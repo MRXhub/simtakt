@@ -1,0 +1,220 @@
+"""Coordinate queue state, pure scheduling, and Worker lifecycle."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Protocol
+
+from control_plane.evaluation.service import EvaluationMiddleware
+from control_plane.evaluation.scheduling import schedule
+from control_plane.simulation.worker import (
+    SimulationWorker,
+    normalize_session_observation,
+)
+from control_plane.simulation.gateway import ReceiptIntegrityError
+
+
+class DispatchError(RuntimeError):
+    """Raised when scheduling or Worker lifecycle breaks the dispatch contract."""
+
+
+class ResourceMonitor(Protocol):
+    """Supply fresh target facts and persist a decision receipt."""
+
+    def locked_snapshot(
+        self, target_id: str
+    ) -> AbstractContextManager[dict[str, Any]]: ...
+
+    def record_decision(
+        self,
+        decision: Mapping[str, Any],
+        candidates: Sequence[Mapping[str, Any]],
+        active_allocations: Sequence[Mapping[str, Any]],
+        resource_snapshot: Mapping[str, Any],
+        *,
+        scheduling_policy: Mapping[str, Any] | None = None,
+        decision_time: datetime | str | None = None,
+        capacity_envelope: Mapping[str, Any] | None = None,
+        capacity_profile_snapshot: Mapping[str, Any] | None = None,
+        task_classes: Sequence[Mapping[str, Any]] = (),
+        overrides: Sequence[Mapping[str, Any]] = (),
+        scheduling_policy_provenance: Mapping[str, Any] | None = None,
+    ) -> tuple[str, Path]: ...
+
+
+class SessionLifecycleDispatcher:
+    """Recover, observe, and collect an already allocated Session."""
+
+    def __init__(
+        self,
+        middleware: EvaluationMiddleware,
+        resource_monitor: ResourceMonitor,
+        worker: SimulationWorker,
+        *,
+        dispatcher_id: str,
+        lease_seconds: int,
+        scheduler: Callable[
+            [
+                Sequence[Mapping[str, Any]],
+                Sequence[Mapping[str, Any]],
+                Mapping[str, Any],
+            ],
+            dict[str, Any],
+        ] = schedule,
+    ) -> None:
+        self.middleware = middleware
+        self.resource_monitor = resource_monitor
+        self.scheduler = scheduler
+        self.worker = worker
+        self.dispatcher_id = str(dispatcher_id).strip()
+        if not self.dispatcher_id:
+            raise DispatchError("dispatcher_id is required")
+        if (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, int)
+            or lease_seconds < 1
+        ):
+            raise DispatchError("lease_seconds must be a positive integer")
+        self.lease_seconds = lease_seconds
+        self.last_auto_released: list[dict[str, Any]] = []
+        self.last_auto_requeued: list[dict[str, Any]] = []
+        self.last_triage: list[dict[str, Any]] = []
+
+    def recover_once(self, *, now: datetime | None = None) -> dict[str, Any] | None:
+        """Apply wall-proof recovery, then claim and observe one session."""
+
+        self.last_auto_released = []
+        self.last_auto_requeued = []
+        self.last_triage = []
+        self.middleware.expire_leases(now=now)
+        auto_release = getattr(self.middleware, "auto_release_wall_budget", None)
+        if callable(auto_release):
+            result = auto_release(now=now)
+            if isinstance(result, list):
+                self.last_auto_released = result
+        auto_requeue = getattr(self.middleware, "auto_requeue_recovering", None)
+        if callable(auto_requeue):
+            result = auto_requeue(now=now)
+            if isinstance(result, list):
+                self.last_triage = result
+                self.last_auto_requeued = [item for item in result if item.get("action", "requeued") == "requeued"]
+        attempt = self.middleware.lease_next_reconciliation(
+            self.dispatcher_id, self.lease_seconds, now=now
+        )
+        if attempt is None:
+            return None
+        return self.poll_once(attempt["attempt_id"], now=now)
+
+    def poll_once(
+        self, attempt_id: str, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        attempt = self.middleware.get_attempt(attempt_id)
+        if attempt["status"] in {"completed", "failed", "lost"}:
+            return attempt
+        if attempt["execution_plan"] is None or attempt["session_ref"] is None:
+            raise DispatchError("Attempt is not bound to a simulation session")
+
+        try:
+            if attempt.get("allocation") is not None:
+                self.worker.resume_session(
+                    attempt["execution_plan"],
+                    attempt["allocation"],
+                    attempt["session_ref"],
+                )
+            observation = normalize_session_observation(
+                self.worker.observe_session(attempt["session_ref"])
+            )
+        except ReceiptIntegrityError as exc:
+            return self.middleware.fail_attempt(
+                attempt_id,
+                self.dispatcher_id,
+                exc.failure_class,
+                now=now,
+            )
+        except Exception:
+            if attempt["status"] in {"running", "collecting"}:
+                self.middleware.require_reconciliation(
+                    attempt_id,
+                    self.dispatcher_id,
+                    reason="worker-observation-indeterminate",
+                    now=now,
+                )
+            raise
+
+        if observation == "running":
+            if attempt["status"] == "reconciling":
+                return self.middleware.reconcile_attempt(
+                    attempt_id,
+                    self.dispatcher_id,
+                    attempt["session_ref"],
+                    "running",
+                    self.lease_seconds,
+                    now=now,
+                )
+            if attempt["status"] != "running":
+                raise DispatchError("running session does not match Attempt state")
+            return self.middleware.heartbeat(
+                attempt_id, self.dispatcher_id, self.lease_seconds, now=now
+            )
+
+        if observation in {"absent", "unreachable", "indeterminate"}:
+            if attempt["status"] != "reconciling":
+                attempt = self.middleware.require_reconciliation(
+                    attempt_id,
+                    self.dispatcher_id,
+                    reason=f"worker-session-{observation}",
+                    now=now,
+                )
+            return self.middleware.reconcile_attempt(
+                attempt_id,
+                self.dispatcher_id,
+                attempt["session_ref"],
+                observation,
+                self.lease_seconds,
+                now=now,
+            )
+
+        if attempt["status"] == "reconciling":
+            attempt = self.middleware.reconcile_attempt(
+                attempt_id,
+                self.dispatcher_id,
+                attempt["session_ref"],
+                "completed",
+                self.lease_seconds,
+                now=now,
+            )
+        elif attempt["status"] == "running":
+            attempt = self.middleware.begin_collection(
+                attempt_id, self.dispatcher_id, now=now
+            )
+        elif attempt["status"] != "collecting":
+            raise DispatchError("completed session does not match Attempt state")
+
+        try:
+            result, result_artifact_id = self.worker.collect_session(
+                attempt["session_ref"]
+            )
+            return self.middleware.complete_session(
+                result,
+                self.dispatcher_id,
+                result_artifact_id,
+                now=now,
+            )
+        except ReceiptIntegrityError as exc:
+            return self.middleware.fail_attempt(
+                attempt_id,
+                self.dispatcher_id,
+                exc.failure_class,
+                now=now,
+            )
+        except Exception:
+            self.middleware.require_reconciliation(
+                attempt_id,
+                self.dispatcher_id,
+                reason="worker-collection-indeterminate",
+                now=now,
+            )
+            raise

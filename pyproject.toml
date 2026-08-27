@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simtakt"
+version = "0.1.0"
+description = "Simulator-neutral orchestration control plane for long-running simulation and evaluation workloads"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["control_plane*"]

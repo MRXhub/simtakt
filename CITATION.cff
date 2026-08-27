@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "simtakt"
+type: software
+authors:
+  - name: "MRXhub"
+repository-code: "https://github.com/MRXhub/simtakt"
+license: MIT
+abstract: >-
+  A simulator-neutral orchestration control plane for long-running
+  simulation and evaluation workloads: immutable evaluation contracts,
+  a pure scheduling function, atomic dispatch, durable SQLite-backed
+  attempt/session/allocation state, pluggable simulator worker/gateway
+  protocols, and a web status console with a self-contained demo mode.

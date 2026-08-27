@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Local cold archives and scratch/runtime dependencies.
+/archive/**
+!/archive/README.md
+/tmp/**
+!/tmp/README.md
+
+# Credentials and local secrets.
+.env
+.env.*
+*.sqlite3
+*.db
+
+# AI assistant and orchestration tool artifacts.
+AGENTS.md
+CLAUDE.md
+.claude/
+.codex/
+.omp/
+.agents/
+.cursorrules
