@@ -37,7 +37,7 @@ REVISION = "sha256:" + "a" * 64
 EVALUATION_ID = "evaluation:fixture"
 CANDIDATE_ID = "candidate:sha256:" + "1" * 64
 TASK_ID = "fixture-task"
-TARGET_ID = "simulation.fixture"
+TARGET_ID = "silvaco.fixture"
 PERFORMANCE_CLASS = "performance-class:sha256:" + "b" * 64
 
 
@@ -145,7 +145,7 @@ def _preparation(*, processors: int = 1, memory_bytes: int = 4 * 1024**3) -> dic
     return make_execution_preparation(
         evaluation_id=EVALUATION_ID,
         candidate_id=CANDIDATE_ID,
-        simulation_proxy="simulation-session-v1",
+        simulation_proxy="silvaco-session-v1",
         numerical_profile="proxy-managed-v1",
         recovery_profile_revision=REVISION,
         task_id=TASK_ID,
@@ -595,6 +595,140 @@ class PolicyDerivedPreparationTests(unittest.TestCase):
                             package_root, frozen
                         )
 
+    def test_authorization_resolves_real_on_disk_json_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            targets_path = root / "project" / "EXECUTION_TARGETS.json"
+            targets_path.parent.mkdir(parents=True, exist_ok=True)
+            target_a = {
+                "target_id": "target-a",
+                "status": "active",
+                "formal_execution": True,
+                "workspace_root": "/remote/a",
+                "allowed_operations": ["simulation"],
+            }
+            target_b = {
+                "target_id": "target-b",
+                "status": "active",
+                "formal_execution": True,
+                "workspace_root": "/remote/b",
+                "allowed_operations": ["simulation"],
+            }
+            targets_path.write_text(
+                json.dumps({"targets": [target_a, target_b]}),
+                encoding="utf-8",
+            )
+            expiry = "2099-01-01T00:00:00+00:00"
+            targets_revision = (
+                "sha256:" + hashlib.sha256(targets_path.read_bytes()).hexdigest()
+            )
+
+            refs = []
+            authorizations_lineage = []
+            for target_id, target in [("target-a", target_a), ("target-b", target_b)]:
+                artifact_id = f"authorization.{target_id}"
+                auth_path = root / "project" / "authorizations" / f"{artifact_id}.json"
+                auth_path.parent.mkdir(parents=True, exist_ok=True)
+                body = {
+                    "authorization_id": artifact_id,
+                    "authorization_kind": "prepared-execution-envelope-v1",
+                    "status": "active",
+                    "task_id": TASK_ID,
+                    "expires_at": expiry,
+                    "scope": {
+                        "target_id": target_id,
+                        "execution_targets_revision": targets_revision,
+                        "max_timeout_seconds": 600,
+                        "max_attempts_per_candidate": 1,
+                        "allowed_processors": [1, 2, 8],
+                        "max_memory_bytes": 8 * 1024**3,
+                    },
+                    "execution_target": dict(target),
+                }
+                auth_path.write_text(json.dumps(body), encoding="utf-8")
+                revision = (
+                    "sha256:" + hashlib.sha256(auth_path.read_bytes()).hexdigest()
+                )
+
+                shard_path = root / "records" / "artifacts" / f"{artifact_id}.json"
+                shard_path.parent.mkdir(parents=True, exist_ok=True)
+                shard_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "record_kind": "artifact-catalog-shard",
+                            "artifact": {
+                                "artifact_id": artifact_id,
+                                "kind": "configuration",
+                                "status": "active",
+                                "latest_revision": revision,
+                                "revisions": [
+                                    {
+                                        "revision": revision,
+                                        "hash_scope": "file",
+                                        "locations": [
+                                            {
+                                                "storage": "workspace",
+                                                "role": "primary",
+                                                "availability": "required",
+                                                "path": f"project/authorizations/{artifact_id}.json",
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                refs.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "revision": revision,
+                        "authorization_kind": "prepared-execution-envelope-v1",
+                        "status": "active",
+                        "target_id": target_id,
+                        "expires_at": expiry,
+                    }
+                )
+                authorizations_lineage.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "revision": revision,
+                        "target_id": target_id,
+                    }
+                )
+
+            options = [
+                {"target_id": "target-a", "processors": 1, "memory_bytes": 4 * 1024**3},
+                {"target_id": "target-b", "processors": 2, "memory_bytes": 4 * 1024**3},
+            ]
+            preparation = {
+                "authorization": {
+                    "artifact_id": "authorization.target-a",
+                    "revision": refs[0]["revision"],
+                },
+                "authorizations": authorizations_lineage,
+                "execution_option_set": {"options": options},
+                "budget": {
+                    "command_timeout_seconds": 600,
+                    "max_solver_runs": 1,
+                    "max_wall_seconds": 900,
+                },
+            }
+            task = {"id": TASK_ID, "execution_authorizations": refs}
+            targets = {"target-a": target_a, "target-b": target_b}
+
+            records = _authorization(
+                root,
+                task,
+                preparation,
+                targets,
+                now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            self.assertEqual(
+                [r["target_id"] for r in records], ["target-a", "target-b"]
+            )
 
 
 if __name__ == "__main__":
