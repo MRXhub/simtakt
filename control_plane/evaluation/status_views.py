@@ -7,8 +7,9 @@ composition root and the HTTP layer can reuse them without drift.
 """
 
 from __future__ import annotations
-
 from typing import Any
+
+from control_plane.core.evaluation_contracts import normalize_token
 
 
 def capacity_status(
@@ -57,3 +58,72 @@ def shape_stats(middleware: Any) -> dict[str, Any]:
     return {"shapes": [{**shape, "budget": {
         "max_wall_seconds": None, "command_timeout_seconds": None}}
         for shape in shapes]}
+
+def algorithms_overview(middleware: Any) -> dict[str, Any]:
+    """Assemble the algorithm runs overview projection."""
+    runs = middleware.list_algorithm_runs()
+    try:
+        overviews = middleware.study_overviews()
+        studies = overviews.get("studies", []) if isinstance(overviews, dict) else []
+    except Exception:
+        studies = []
+
+    studies_by_run: dict[str, list[dict[str, Any]]] = {}
+    for study in studies:
+        run_id = study.get("algorithm_run_id")
+        if run_id:
+            studies_by_run.setdefault(run_id, []).append(study)
+
+    items = []
+    for run in runs:
+        run_id = run.get("algorithm_run_id")
+        matched = studies_by_run.get(run_id, [])
+        study_ids = [str(s["study_id"]) for s in matched if "study_id" in s]
+        eval_count = sum(int(s.get("evaluation_count", 0)) for s in matched)
+        active_count = sum(int(s.get("active_count", 0)) for s in matched)
+        items.append({
+            **run,
+            "study_ids": study_ids,
+            "study_count": len(study_ids),
+            "evaluation_count": eval_count,
+            "active_count": active_count,
+        })
+    return {
+        "algorithm_count": len(items),
+        "algorithms": items,
+    }
+
+
+def algorithm_detail(middleware: Any, algorithm_run_id: str) -> dict[str, Any]:
+    """Assemble the detailed status view for a single algorithm run."""
+    normalized_run_id = normalize_token(algorithm_run_id, "algorithm_run_id")
+    run = middleware.get_algorithm_run(normalized_run_id)
+    events = middleware.list_algorithm_events(normalized_run_id)
+    results = middleware.list_algorithm_results(normalized_run_id)
+
+    try:
+        overviews = middleware.study_overviews()
+        studies = overviews.get("studies", []) if isinstance(overviews, dict) else []
+    except Exception:
+        studies = []
+
+    matched = [s for s in studies if s.get("algorithm_run_id") == normalized_run_id]
+    study_ids = [str(s["study_id"]) for s in matched if "study_id" in s]
+    eval_count = sum(int(s.get("evaluation_count", 0)) for s in matched)
+    active_count = sum(int(s.get("active_count", 0)) for s in matched)
+
+    return {
+        "algorithm": {
+            **run,
+            "study_ids": study_ids,
+            "study_count": len(study_ids),
+            "evaluation_count": eval_count,
+            "active_count": active_count,
+        },
+        "events": events,
+        "results": results,
+    }
+def schema_detail(middleware: Any, revision: str) -> dict[str, Any]:
+    """Assemble the dereferenced ParameterSchema document view."""
+    schema_doc = middleware.get_schema(revision)
+    return schema_doc.get("schema", schema_doc)

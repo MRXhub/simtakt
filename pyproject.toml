@@ -11,3 +11,6 @@ requires-python = ">=3.10"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["control_plane*"]
+
+[tool.setuptools.package-data]
+"control_plane.web" = ["static/*", "static/views/*"]

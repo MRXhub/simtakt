@@ -164,6 +164,12 @@ class SQLiteEvaluationRepository:
                     applied_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS schema_documents (
+                    revision TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    canonical_json TEXT NOT NULL,
+                    registered_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS problem_definitions (
                     problem_id TEXT NOT NULL,
                     revision TEXT NOT NULL,
@@ -465,6 +471,14 @@ class SQLiteEvaluationRepository:
                         "CREATE INDEX IF NOT EXISTS idx_study_evaluations_evaluation "
                         "ON study_evaluations(evaluation_id, study_id)"
                     )
+                    connection.execute(
+                        """CREATE TABLE IF NOT EXISTS schema_documents (
+                            revision TEXT PRIMARY KEY,
+                            kind TEXT NOT NULL,
+                            canonical_json TEXT NOT NULL,
+                            registered_at TEXT NOT NULL
+                        )"""
+                    )
                     if existing is None or int(existing["version"]) != SCHEMA_VERSION:
                         connection.execute(
                             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
@@ -639,6 +653,126 @@ class SQLiteEvaluationRepository:
             publish=publish,
             created_at=timestamp,
         )
+
+    def register_schema_document(
+        self, document: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Idempotently register one canonical ParameterSchema document."""
+        from control_plane.evaluation.parameter_schema import (
+            compute_schema_revision,
+            validate_parameter_schema,
+        )
+
+        canonical = validate_parameter_schema(document)
+        revision = compute_schema_revision(canonical)
+        kind = str(canonical.get("kind", "parameter-schema"))
+        raw_json = canonical_json(canonical)
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT revision, kind, canonical_json, registered_at FROM schema_documents WHERE revision = ?",
+                (revision,),
+            ).fetchone()
+            if row is not None:
+                schema_obj = json.loads(str(row["canonical_json"]))
+                extracts = schema_obj.get("extracts") if isinstance(schema_obj, dict) else None
+                extract_names = (
+                    [str(e["name"]) for e in extracts if isinstance(e, dict) and "name" in e]
+                    if isinstance(extracts, list)
+                    else []
+                )
+                return {
+                    "revision": str(row["revision"]),
+                    "kind": str(row["kind"]),
+                    "canonical_json": str(row["canonical_json"]),
+                    "registered_at": str(row["registered_at"]),
+                    "schema": schema_obj,
+                    "extract_names": extract_names,
+                }
+            now = _iso()
+            connection.execute(
+                """
+                INSERT INTO schema_documents(revision, kind, canonical_json, registered_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (revision, kind, raw_json, now),
+            )
+            extracts = canonical.get("extracts")
+            extract_names = (
+                [str(e["name"]) for e in extracts if isinstance(e, dict) and "name" in e]
+                if isinstance(extracts, list)
+                else []
+            )
+            return {
+                "revision": revision,
+                "kind": kind,
+                "canonical_json": raw_json,
+                "registered_at": now,
+                "schema": canonical,
+                "extract_names": extract_names,
+            }
+
+    def get_schema_document(self, revision: str) -> dict[str, Any]:
+        """Fetch one ParameterSchema document by its stable revision hash."""
+        rev = str(revision).strip().lower()
+        if not _SHA256_REVISION.fullmatch(rev):
+            raise RepositoryError(f"unknown Schema: {revision}")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT revision, kind, canonical_json, registered_at FROM schema_documents WHERE revision = ?",
+                (rev,),
+            ).fetchone()
+            if row is None:
+                raise RepositoryError(f"unknown Schema: {revision}")
+            schema_obj = json.loads(str(row["canonical_json"]))
+            extracts = schema_obj.get("extracts") if isinstance(schema_obj, dict) else None
+            extract_names = (
+                [str(e["name"]) for e in extracts if isinstance(e, dict) and "name" in e]
+                if isinstance(extracts, list)
+                else []
+            )
+            return {
+                "revision": str(row["revision"]),
+                "kind": str(row["kind"]),
+                "canonical_json": str(row["canonical_json"]),
+                "registered_at": str(row["registered_at"]),
+                "schema": schema_obj,
+                "extract_names": extract_names,
+            }
+
+    def list_schema_documents(self) -> list[dict[str, Any]]:
+        """List all registered ParameterSchema documents."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT revision, kind, canonical_json, registered_at FROM schema_documents ORDER BY registered_at DESC"
+            ).fetchall()
+            results = []
+            for r in rows:
+                schema_obj = json.loads(str(r["canonical_json"]))
+                extracts = schema_obj.get("extracts") if isinstance(schema_obj, dict) else None
+                extract_names = (
+                    [str(e["name"]) for e in extracts if isinstance(e, dict) and "name" in e]
+                    if isinstance(extracts, list)
+                    else []
+                )
+                params = schema_obj.get("parameters") if isinstance(schema_obj, dict) else None
+                parameter_count = len(params) if isinstance(params, list) else 0
+                results.append(
+                    {
+                        "revision": str(r["revision"]),
+                        "kind": str(r["kind"]),
+                        "registered_at": str(r["registered_at"]),
+                        "extract_names": extract_names,
+                        "parameter_count": parameter_count,
+                    }
+                )
+            return results
+    def list_problems(self) -> list[dict[str, Any]]:
+        """List all registered ProblemDefinition records."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT definition_json FROM problem_definitions ORDER BY created_at, problem_id"
+            ).fetchall()
+            return [json.loads(row["definition_json"]) for row in rows]
 
     def register_problem(self, definition: Mapping[str, Any]) -> dict[str, Any]:
         normalized = validate_problem_definition(definition)
@@ -894,14 +1028,19 @@ class SQLiteEvaluationRepository:
                 evaluations.append({**evaluation, "attempts": [self._attempt_summary(row) for row in attempts]})
         return {"study": self._study_record(study_row), "evaluations": evaluations}
 
-    def list_studies(self, problem_id: str) -> list[dict[str, Any]]:
-        normalized_id = normalize_token(problem_id, "problem_id")
+    def list_studies(self, problem_id: str | None = None) -> list[dict[str, Any]]:
         with closing(self._connect()) as connection:
-            rows = connection.execute(
-                """SELECT * FROM studies WHERE problem_id = ?
-                   ORDER BY created_at, study_id""",
-                (normalized_id,),
-            ).fetchall()
+            if problem_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM studies ORDER BY created_at, study_id"
+                ).fetchall()
+            else:
+                normalized_id = normalize_token(problem_id, "problem_id")
+                rows = connection.execute(
+                    """SELECT * FROM studies WHERE problem_id = ?
+                       ORDER BY created_at, study_id""",
+                    (normalized_id,),
+                ).fetchall()
         return [self._study_record(row) for row in rows]
 
     def list_study_overviews(self, limit: int | None = None) -> dict[str, Any]:
@@ -1006,14 +1145,46 @@ class SQLiteEvaluationRepository:
                        ORDER BY e.created_at, e.evaluation_id""",
                     (normalized_id, revision),
                 ).fetchall()
-        return [self._evaluation_record(row) for row in rows]
+            evaluations = []
+            for row in rows:
+                rec = self._evaluation_record(row)
+                rec.update(self._wait_fields(connection, str(row["evaluation_id"]), str(row["status"])))
+                evaluations.append(rec)
+            return evaluations
 
     def list_evaluations(
-        self, problem_id: str, problem_revision: str | None = None
+        self, problem_id: str | None = None, problem_revision: str | None = None
     ) -> list[dict[str, Any]]:
-        """Return the immutable Evaluation projection for one Problem lineage."""
-
-        return self.list_problem_evaluations(problem_id, problem_revision)
+        """Return the immutable Evaluation projection for one Problem lineage, or all Evaluations."""
+        with closing(self._connect()) as connection:
+            if problem_id is None:
+                rows = connection.execute(
+                    "SELECT * FROM evaluations ORDER BY created_at, evaluation_id"
+                ).fetchall()
+            elif problem_revision is None:
+                normalized_id = normalize_token(problem_id, "problem_id")
+                rows = connection.execute(
+                    """SELECT e.* FROM evaluations e
+                       JOIN candidates c ON c.candidate_id = e.candidate_id
+                       WHERE c.problem_id = ?
+                       ORDER BY e.created_at, e.evaluation_id""",
+                    (normalized_id,),
+                ).fetchall()
+            else:
+                normalized_id = normalize_token(problem_id, "problem_id")
+                revision = str(problem_revision).strip().lower()
+                if not _SHA256_REVISION.fullmatch(revision):
+                    raise ContractError(
+                        "problem_revision must be sha256:<64 lowercase hex characters>"
+                    )
+                rows = connection.execute(
+                    """SELECT e.* FROM evaluations e
+                       JOIN candidates c ON c.candidate_id = e.candidate_id
+                       WHERE c.problem_id = ? AND c.problem_revision = ?
+                       ORDER BY e.created_at, e.evaluation_id""",
+                    (normalized_id, revision),
+                ).fetchall()
+            return [self._evaluation_record(row) for row in rows]
 
     def associate_study_evaluation(self, study_id: str, evaluation_id: str) -> None:
         normalized_study_id = normalize_token(study_id, "study_id")
@@ -4608,6 +4779,14 @@ class SQLiteEvaluationRepository:
             ).fetchone()
             assert row is not None
             return self._algorithm_run_record(row)
+
+    def list_algorithm_runs(self) -> list[dict[str, Any]]:
+        """Return all algorithm run records ordered by algorithm_run_id."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM algorithm_runs ORDER BY algorithm_run_id"
+            ).fetchall()
+            return [self._algorithm_run_record(row) for row in rows]
 
     def get_algorithm_run(self, algorithm_run_id: str) -> dict[str, Any]:
         run_id = normalize_token(algorithm_run_id, "algorithm_run_id")

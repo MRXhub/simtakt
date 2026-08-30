@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-
 from control_plane.core.ports import ControlStore
 from control_plane.evaluation.project_ports import ProjectFileControlStore
 from control_plane.core.evaluation_contracts import (
@@ -77,6 +77,146 @@ class EvaluationMiddleware:
             project_root=root,
         )
 
+    def register_schema(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        """Register one ParameterSchema document idempotently."""
+        return self._repository.register_schema_document(document)
+
+    def get_schema(self, revision: str) -> dict[str, Any]:
+        """Fetch one ParameterSchema document by its stable revision."""
+        return self._repository.get_schema_document(revision)
+
+    def list_schemas(self) -> list[dict[str, Any]]:
+        """List all registered ParameterSchema documents."""
+        return self._repository.list_schema_documents()
+
+    def list_packages(self) -> list[dict[str, Any]]:
+        """List registered/materialized input packages from workspace storage and registry."""
+        if self._project_root is None:
+            return []
+        root = Path(self._project_root).resolve()
+        packages: dict[str, dict[str, Any]] = {}
+
+        # 1. Scan records/artifacts shards for active input-package records
+        artifacts_dir = root / "records" / "artifacts"
+        if artifacts_dir.is_dir():
+            try:
+                for entry in sorted(artifacts_dir.glob("*.json")):
+                    try:
+                        data = json.loads(entry.read_text(encoding="utf-8-sig"))
+                        if not isinstance(data, dict):
+                            continue
+                        if data.get("schema_version") != 1 or data.get("record_kind") != "artifact-catalog-shard":
+                            continue
+                        art = data.get("artifact")
+                        if not isinstance(art, dict) or art.get("kind") != "input-package" or art.get("status") != "active":
+                            continue
+                        art_id = str(art.get("artifact_id", ""))
+                        if not art_id:
+                            continue
+                        latest_rev = str(art.get("latest_revision", ""))
+                        primary_path = None
+                        for rev_entry in art.get("revisions", []):
+                            if isinstance(rev_entry, dict) and rev_entry.get("revision") == latest_rev:
+                                for loc in rev_entry.get("locations", []):
+                                    if isinstance(loc, dict) and loc.get("role") == "primary":
+                                        primary_path = loc.get("path")
+                                        break
+                                if primary_path:
+                                    break
+
+                        pkg_name = art_id.removeprefix("package.").removeprefix("pkg:")
+                        if primary_path:
+                            raw_pkg_path = root / primary_path
+                        else:
+                            raw_pkg_path = root / "data" / "inputs" / "packages" / pkg_name
+
+                        try:
+                            resolved_pkg_dir = raw_pkg_path.resolve()
+                            rel_path = str(resolved_pkg_dir.relative_to(root)).replace("\\", "/")
+                        except (ValueError, RuntimeError):
+                            continue
+
+                        pkg_item: dict[str, Any] = {
+                            "package_name": pkg_name,
+                            "artifact_id": art_id,
+                            "revision": latest_rev,
+                            "status": "active",
+                            "path": rel_path,
+                            "deck_file": "deck.in",
+                            "created_at": art.get("status_changed_at"),
+                            "dependencies": [],
+                            "files": [],
+                        }
+                        manifest_file = resolved_pkg_dir / "manifest.json"
+                        if manifest_file.is_file():
+                            try:
+                                m = json.loads(manifest_file.read_text(encoding="utf-8"))
+                                if isinstance(m, dict):
+                                    pkg_item["package_name"] = m.get("package_name", pkg_name)
+                                    pkg_item["deck_file"] = m.get("deck_file", "deck.in")
+                                    pkg_item["dependencies"] = m.get("dependencies", [])
+                                    pkg_item["files"] = m.get("files", [])
+                                    if m.get("created_at"):
+                                        pkg_item["created_at"] = m["created_at"]
+                            except Exception:
+                                pass
+                        packages[art_id] = pkg_item
+                    except Exception:
+                        continue
+            except OSError:
+                pass
+
+        # 2. Scan data/inputs/packages directory for landed packages
+        pkg_root = root / "data" / "inputs" / "packages"
+        if pkg_root.is_dir():
+            try:
+                for entry in sorted(pkg_root.iterdir()):
+                    if not entry.is_dir() or entry.name.startswith("."):
+                        continue
+                    try:
+                        resolved_entry = entry.resolve()
+                        rel_path = str(resolved_entry.relative_to(root)).replace("\\", "/")
+                    except (ValueError, RuntimeError):
+                        continue
+
+                    manifest_file = resolved_entry / "manifest.json"
+                    if not manifest_file.is_file():
+                        continue
+                    try:
+                        m = json.loads(manifest_file.read_text(encoding="utf-8"))
+                        if not isinstance(m, dict):
+                            continue
+                        pkg_name = m.get("package_name", entry.name)
+                        art_id = m.get("artifact_id", f"pkg:{pkg_name}")
+                        deck_file = m.get("deck_file", "deck.in")
+                        deck_path = resolved_entry / deck_file
+                        if deck_path.is_file():
+                            rev = "sha256:" + hashlib.sha256(deck_path.read_bytes()).hexdigest().lower()
+                        else:
+                            rev = "sha256:" + hashlib.sha256(manifest_file.read_bytes()).hexdigest().lower()
+                        pkg_item = {
+                            "package_name": pkg_name,
+                            "artifact_id": art_id,
+                            "revision": rev,
+                            "status": "registered",
+                            "path": rel_path,
+                            "deck_file": deck_file,
+                            "created_at": m.get("created_at"),
+                            "dependencies": m.get("dependencies", []),
+                            "files": m.get("files", []),
+                        }
+                        packages[art_id] = pkg_item
+                    except Exception:
+                        continue
+            except OSError:
+                pass
+
+        return list(packages.values())
+
+    def list_problems(self) -> list[dict[str, Any]]:
+        """List all registered ProblemDefinition records."""
+        return self._repository.list_problems()
+
     def register_problem(self, definition: Mapping[str, Any]) -> dict[str, Any]:
         return self._repository.register_problem(validate_problem_definition(definition))
 
@@ -104,7 +244,7 @@ class EvaluationMiddleware:
     def get_study_status(self, study_id: str) -> dict[str, Any]:
         return self._repository.get_study_status(study_id)
 
-    def list_studies(self, problem_id: str) -> list[dict[str, Any]]:
+    def list_studies(self, problem_id: str | None = None) -> list[dict[str, Any]]:
         return self._repository.list_studies(problem_id)
 
     def study_overviews(self, limit: int | None = None) -> dict[str, Any]:
@@ -116,7 +256,7 @@ class EvaluationMiddleware:
         return self._repository.list_problem_evaluations(problem_id, problem_revision)
 
     def list_evaluations(
-        self, problem_id: str, problem_revision: str | None = None
+        self, problem_id: str | None = None, problem_revision: str | None = None
     ) -> list[dict[str, Any]]:
         return self._repository.list_evaluations(problem_id, problem_revision)
 
@@ -161,7 +301,9 @@ class EvaluationMiddleware:
         try:
             state = self._control_store.read_project_state(self._project_root)
         except (OSError, ValueError) as exc:
-            raise ContractError("PROJECT_STATE is unreadable during admission") from exc
+            raise ContractError(
+                "PROJECT_STATE is unreadable during admission"
+            ) from exc
         tasks = state.get("active_tasks") if isinstance(state, Mapping) else None
         if not isinstance(tasks, list):
             return
@@ -849,6 +991,9 @@ class EvaluationMiddleware:
             "events": stored_events,
             "result": stored_result,
         }
+
+    def list_algorithm_runs(self) -> list[dict[str, Any]]:
+        return self._repository.list_algorithm_runs()
 
     def get_algorithm_run(self, algorithm_run_id: str) -> dict[str, Any]:
         return self._repository.get_algorithm_run(algorithm_run_id)

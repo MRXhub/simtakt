@@ -149,6 +149,7 @@ def _resolve_json_artifact(
         ) from exc
     if resolved.hash_scope != "file":
         raise GovernedPreparationError(f"{label} must use file hash scope")
+    return _read_json(resolved.path, label), resolved.path
 def _authorization(
     project_root: Path,
     task: Mapping[str, Any],

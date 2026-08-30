@@ -17,7 +17,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -31,13 +31,34 @@ from control_plane.evaluation.scheduling_policy import resolve_governed_scheduli
 from control_plane.evaluation.service import EvaluationMiddleware
 
 from control_plane.evaluation import mutation_views
+from control_plane.web.package_landing import PackageLandingService
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8321
 MAX_CONCURRENT_REQUESTS = 8
 MAX_BODY_BYTES = 2 * 1024 * 1024
-STATIC_INDEX = Path(__file__).resolve().parent / "static" / "index.html"
-
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_INDEX = STATIC_DIR / "index.html"
+STATIC_EXTENSION_MIME: dict[str, str] = {
+    ".html": "text/html; charset=utf-8",
+    ".htm": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".wasm": "application/wasm",
+    ".txt": "text/plain; charset=utf-8",
+}
 def parse_overview_limit(query: str) -> int | None:
     """Parse the optional overview limit without accepting ambiguous values."""
     params = urllib.parse.parse_qs(query, keep_blank_values=True)
@@ -73,6 +94,7 @@ class StatusServer(ThreadingHTTPServer):
         demo: bool = False,
         topology: Any | None = None,
         policy: Any | None = None,
+        package_landing: PackageLandingService | None = None,
     ) -> None:
         super().__init__(server_address, StatusRequestHandler)
         self.middleware = middleware
@@ -81,9 +103,20 @@ class StatusServer(ThreadingHTTPServer):
         self.demo = demo
         self.topology = topology
         self.policy = policy
+        if package_landing is not None:
+            self.package_landing = package_landing
+        elif self.allow_writes:
+            self.package_landing = PackageLandingService(self.project_root, autostart=True)
+        else:
+            self.package_landing = None
         self.started_at = time.monotonic()
         self.request_semaphore = threading.BoundedSemaphore(max_concurrent_requests)
         self.mutation_lock = threading.Lock()
+
+    def server_close(self) -> None:
+        if getattr(self, "package_landing", None) is not None:
+            self.package_landing.close()
+        super().server_close()
 
 
 class DemoPolicy:
@@ -97,8 +130,120 @@ class DemoMiddleware:
     """In-memory fixture implementing the read views used by the status server."""
 
     def __init__(self) -> None:
-        self._studies = [{"study_id": "demo-study-a", "problem_id": "demo-problem"}]
+        self._packages: list[dict[str, Any]] = []
+        self._schemas: dict[str, dict[str, Any]] = {}
+        self._problems: list[dict[str, Any]] = []
+        self._studies: list[dict[str, Any]] = []
         self._evaluations: list[dict[str, Any]] = []
+        self._study_evaluations: dict[str, list[str]] = {}
+        self._init_fixtures()
+
+    def _init_fixtures(self) -> None:
+        from control_plane.evaluation.parameter_schema import (
+            compute_schema_revision,
+            validate_parameter_schema,
+        )
+        demo_package = {
+            "package_name": "demo-package",
+            "artifact_id": "pkg:demo-package",
+            "revision": "sha256:" + "5" * 64,
+            "path": "data/inputs/packages/demo-package",
+            "deck_file": "deck.in",
+            "status": "registered",
+            "created_at": "2026-08-28T00:00:00+00:00",
+            "dependencies": [],
+            "files": [
+                {
+                    "name": "deck.in",
+                    "bytes": 100,
+                    "sha256": "5" * 64,
+                }
+            ],
+        }
+        self._packages.append(demo_package)
+
+        sample_schema = {
+            "kind": "parameter-schema",
+            "problem_hint": "demo-problem",
+            "source_package": {
+                "artifact_id": "pkg:demo-package",
+                "revision": "sha256:" + "5" * 64,
+            },
+            "parameters": [
+                {
+                    "name": "thickness",
+                    "type": "float",
+                    "role": "variable",
+                    "bounds": {"min": 0.1, "max": 10.0},
+                    "default": 1.0,
+                },
+                {
+                    "name": "doping",
+                    "type": "float",
+                    "role": "variable",
+                    "bounds": {"min": 1e14, "max": 1e18},
+                    "default": 1e16,
+                },
+            ],
+            "extracts": [
+                {"name": "1Jsc", "expression": "$Jsc", "line": 10},
+                {"name": "1Eff", "expression": "$Eff", "line": 12},
+            ],
+        }
+        canonical_schema = validate_parameter_schema(sample_schema)
+        schema_rev = compute_schema_revision(canonical_schema)
+        extracts = canonical_schema.get("extracts", [])
+        extract_names = [e["name"] for e in extracts if isinstance(e, dict) and "name" in e]
+        self._schemas[schema_rev] = {
+            "revision": schema_rev,
+            "kind": canonical_schema.get("kind", "parameter-schema"),
+            "canonical_json": json.dumps(canonical_schema),
+            "registered_at": "2026-08-28T00:00:00+00:00",
+            "schema": canonical_schema,
+            "extract_names": extract_names,
+        }
+        demo_problem = {
+            "contract_version": 1,
+            "problem_id": "demo-problem",
+            "parameter_schema_revision": schema_rev,
+            "constraint_revision": "sha256:" + "0" * 64,
+            "simulation_capabilities": ["cpu"],
+            "metric_schema_revision": "sha256:" + "1" * 64,
+            "revision": "sha256:" + "2" * 64,
+        }
+        self._problems.append(demo_problem)
+
+        demo_study = {
+            "study_id": "demo-study-a",
+            "problem_id": "demo-problem",
+            "problem_revision": demo_problem["revision"],
+            "created_at": "2026-08-28T00:00:00+00:00",
+            "metadata": {"description": "Demo Study A"},
+            "algorithm_run_id": "demo-run-a",
+            "artifact_refs": [],
+            "automation_profile": "assisted",
+        }
+        self._studies.append(demo_study)
+        self._study_evaluations = {"demo-study-a": ["evaluation:00000000-0000-0000-0000-000000000001"]}
+
+        demo_eval = {
+            "contract_version": 1,
+            "evaluation_id": "evaluation:00000000-0000-0000-0000-000000000001",
+            "candidate_id": "candidate:sha256:" + "3" * 64,
+            "problem_id": "demo-problem",
+            "problem_revision": demo_problem["revision"],
+            "fidelity": "high",
+            "requested_outputs": ["score"],
+            "evidence_profile": "default",
+            "independence_requirement": "normal",
+            "priority": "normal",
+            "idempotency_key": "sha256:" + "4" * 64,
+            "status": "queued",
+            "observation_id": None,
+            "created_at": "2026-08-28T00:00:00+00:00",
+            "updated_at": "2026-08-28T00:00:00+00:00",
+        }
+        self._evaluations.append(demo_eval)
 
     def active_allocations(self) -> list[dict[str, Any]]:
         return [{"target_id": "demo-target-a"}]
@@ -120,29 +265,107 @@ class DemoMiddleware:
         study = next((s for s in self._studies if s["study_id"] == study_id), None)
         if study is None:
             raise RepositoryError(f"unknown Study: {study_id}")
-        return {"study": study, "evaluations": self._evaluations}
+        eval_ids = set(self._study_evaluations.get(study_id, []))
+        study_evals = [e for e in self._evaluations if e.get("evaluation_id") in eval_ids]
+        return {"study": study, "evaluations": study_evals}
 
-    def list_studies(self, problem_id: str) -> list[dict[str, Any]]:
-        return [s for s in self._studies if s["problem_id"] == problem_id]
+    def list_studies(self, problem_id: str | None = None) -> list[dict[str, Any]]:
+        if problem_id is None:
+            return list(self._studies)
+        return [s for s in self._studies if s.get("problem_id") == problem_id]
 
     def list_problem_evaluations(self, problem_id: str, *_args: Any) -> list[dict[str, Any]]:
         return [e for e in self._evaluations if e.get("problem_id") == problem_id]
 
+    def list_evaluations(self, problem_id: str | None = None, *_args: Any) -> list[dict[str, Any]]:
+        if problem_id is None:
+            return list(self._evaluations)
+        return [e for e in self._evaluations if e.get("problem_id") == problem_id]
+
+    def list_problems(self) -> list[dict[str, Any]]:
+        return list(self._problems)
+
     def register_problem(self, definition: dict[str, Any]) -> dict[str, Any]:
-        return dict(definition)
+        prob = dict(definition)
+        self._problems.append(prob)
+        return prob
 
     def create_study(self, **kwargs: Any) -> dict[str, Any]:
-        study = {k: v for k, v in kwargs.items() if k in {"study_id", "problem_id"}}
+        study = dict(kwargs)
+        if "created_at" not in study:
+            study["created_at"] = datetime.now(timezone.utc).isoformat()
         self._studies.append(study)
         return study
 
-    def submit(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+    def submit(self, *args: Any, study_id: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        if study_id:
+            candidate = args[0] if len(args) > 0 else kwargs.get("candidate")
+            request = args[1] if len(args) > 1 else kwargs.get("request")
+            if isinstance(request, dict) and "evaluation_id" in request:
+                self._study_evaluations.setdefault(study_id, []).append(request["evaluation_id"])
         return {"status": "accepted", "demo": True}
+
+    def list_algorithm_runs(self) -> list[dict[str, Any]]:
+        return []
+
+    def get_algorithm_run(self, algorithm_run_id: str) -> dict[str, Any]:
+        raise RepositoryError(f"unknown AlgorithmRun: {algorithm_run_id}")
+
+    def list_algorithm_events(self, algorithm_run_id: str) -> list[dict[str, Any]]:
+        return []
+
+    def list_algorithm_results(self, algorithm_run_id: str) -> list[dict[str, Any]]:
+        return []
+
+    def register_schema(self, document: Mapping[str, Any]) -> dict[str, Any]:
+        from control_plane.evaluation.parameter_schema import (
+            compute_schema_revision,
+            validate_parameter_schema,
+        )
+        canonical = validate_parameter_schema(document)
+        rev = compute_schema_revision(canonical)
+        if rev not in self._schemas:
+            extracts = canonical.get("extracts", [])
+            extract_names = [e["name"] for e in extracts if isinstance(e, dict) and "name" in e]
+            self._schemas[rev] = {
+                "revision": rev,
+                "kind": canonical.get("kind", "parameter-schema"),
+                "canonical_json": json.dumps(canonical),
+                "registered_at": datetime.now(timezone.utc).isoformat(),
+                "schema": canonical,
+                "extract_names": extract_names,
+            }
+        return self._schemas[rev]
+
+    def get_schema(self, revision: str) -> dict[str, Any]:
+        rev = str(revision).strip().lower()
+        if rev not in self._schemas:
+            raise RepositoryError(f"unknown Schema: {revision}")
+        return self._schemas[rev]
+
+    def list_schemas(self) -> list[dict[str, Any]]:
+        results = []
+        for s in self._schemas.values():
+            schema_obj = s.get("schema", {})
+            params = schema_obj.get("parameters") if isinstance(schema_obj, dict) else None
+            param_count = len(params) if isinstance(params, list) else 0
+            results.append({
+                "revision": s["revision"],
+                "kind": s["kind"],
+                "registered_at": s["registered_at"],
+                "extract_names": s.get("extract_names", []),
+                "parameter_count": param_count,
+            })
+        return results
+
+    def list_packages(self) -> list[dict[str, Any]]:
+        return list(self._packages)
 
 class StatusRequestHandler(BaseHTTPRequestHandler):
     """Route GET requests and optionally gated mutation POST requests."""
     server_version = "StatusServer/0.1"
     server: StatusServer
+    timeout = 10.0
 
     def do_GET(self) -> None:  # noqa: N802
         with self.server.request_semaphore:
@@ -170,11 +393,25 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
     do_OPTIONS = _method_not_allowed
 
     def _dispatch_post(self) -> None:
-        if not self.server.allow_writes:
+        if "Transfer-Encoding" in self.headers:
+            raise _HttpError(400, "Transfer-Encoding is not supported")
+        path = urllib.parse.urlsplit(self.path).path
+        if not self.server.allow_writes and path not in {
+            "/api/packages/parse",
+            "/api/candidates/validate",
+        }:
             self._method_not_allowed()
             return
-        path = urllib.parse.urlsplit(self.path).path
-        if path not in {"/api/contracts/build", "/api/problems", "/api/studies", "/api/evaluations"}:
+        if path not in {
+            "/api/contracts/build",
+            "/api/problems",
+            "/api/studies",
+            "/api/evaluations",
+            "/api/packages/parse",
+            "/api/packages",
+            "/api/schemas",
+            "/api/candidates/validate",
+        }:
             self._send_json(404, {"error": f"unknown path: {path}"})
             return
         try:
@@ -198,8 +435,18 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
                     payload = mutation_views.register_problem(self.server.middleware, body)
                 elif path == "/api/studies":
                     payload = mutation_views.create_study(self.server.middleware, body)
-                else:
+                elif path == "/api/evaluations":
                     payload = mutation_views.submit_evaluation(self.server.middleware, body)
+                elif path == "/api/packages/parse":
+                    payload = mutation_views.parse_deck(body)
+                elif path == "/api/packages":
+                    payload = self.server.package_landing.submit_package(body)
+                    self._send_json(202, payload)
+                    return
+                elif path == "/api/schemas":
+                    payload = mutation_views.register_schema(self.server.middleware, body)
+                elif path == "/api/candidates/validate":
+                    payload = mutation_views.validate_candidate_parameters(self.server.middleware, body)
         except _HttpError as exc:
             self._send_json(exc.status, {"error": exc.message})
             return
@@ -224,7 +471,15 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
         if path == "/":
             self._send_static()
             return
+        if path.startswith("/static/"):
+            try:
+                self._send_static_file(path)
+            except _HttpError as exc:
+                self._send_json(exc.status, {"error": exc.message})
+            return
         try:
+            if "Transfer-Encoding" in self.headers:
+                raise _HttpError(400, "Transfer-Encoding is not supported")
             payload = self._api_payload(path, split_path.query)
         except _HttpError as exc:
             self._send_json(exc.status, {"error": exc.message})
@@ -264,9 +519,30 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
                     "study_count": overview["study_count"],
                     "global": self.server.middleware.capacity_counts(),
                     "studies": overview["studies"]}
-        if path.startswith("/api/studies/"):
-            study_id = urllib.parse.unquote(path[len("/api/studies/"):])
-            return self.server.middleware.get_study_status(study_id)
+        if path == "/api/algorithms":
+            return status_views.algorithms_overview(self.server.middleware)
+        if path.startswith("/api/algorithms/"):
+            algorithm_run_id = urllib.parse.unquote(path[len("/api/algorithms/"):])
+            return status_views.algorithm_detail(self.server.middleware, algorithm_run_id)
+        if path.startswith("/api/packages/jobs/"):
+            if self.server.package_landing is None:
+                raise _HttpError(404, "package landing service is disabled on read-only server")
+            job_id = urllib.parse.unquote(path[len("/api/packages/jobs/"):])
+            if not job_id:
+                raise _HttpError(404, "job_id is required")
+            job = self.server.package_landing.get_job(job_id)
+            if job is None:
+                raise _HttpError(404, f"Package job not found: {job_id}")
+            return job
+        if path == "/api/packages":
+            return {"items": self.server.middleware.list_packages()}
+        if path == "/api/schemas":
+            return {"items": self.server.middleware.list_schemas()}
+        if path.startswith("/api/schemas/"):
+            revision = urllib.parse.unquote(path[len("/api/schemas/"):])
+            return status_views.schema_detail(self.server.middleware, revision)
+        if path == "/api/problems":
+            return {"items": self.server.middleware.list_problems()}
         if path.startswith("/api/problems/"):
             problem_id = urllib.parse.unquote(path[len("/api/problems/"):])
             studies = self.server.middleware.list_studies(problem_id)
@@ -274,6 +550,13 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
             if not studies and not evaluations:
                 raise _HttpError(404, f"unknown Problem: {problem_id}")
             return {"problem_id": problem_id, "studies": studies, "evaluations": evaluations}
+        if path == "/api/studies":
+            return {"items": self.server.middleware.list_studies()}
+        if path.startswith("/api/studies/"):
+            study_id = urllib.parse.unquote(path[len("/api/studies/"):])
+            return self.server.middleware.get_study_status(study_id)
+        if path == "/api/evaluations":
+            return {"items": self.server.middleware.list_evaluations()}
         raise _HttpError(404, f"unknown path: {path}")
 
     def _send_static(self) -> None:
@@ -284,6 +567,38 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_bytes(200, body, "text/html; charset=utf-8")
 
+    def _send_static_file(self, raw_path: str) -> None:
+        rel_path = raw_path[len("/static/"):]
+        unquoted = urllib.parse.unquote(rel_path)
+        if not unquoted or "\0" in unquoted:
+            raise _HttpError(404, "static file not found")
+        if ".." in unquoted or "\\" in unquoted:
+            raise _HttpError(403, "path traversal detected")
+        norm_parts = Path(unquoted).parts
+        if any(part in {"..", "/", "\\"} or not part for part in norm_parts):
+            raise _HttpError(403, "path traversal detected")
+
+        target = (STATIC_DIR / unquoted).resolve()
+        static_dir_resolved = STATIC_DIR.resolve()
+        try:
+            target.relative_to(static_dir_resolved)
+        except ValueError:
+            raise _HttpError(403, "path traversal detected")
+
+        ext = target.suffix.lower()
+        if not ext or ext not in STATIC_EXTENSION_MIME:
+            raise _HttpError(403, f"disallowed file extension: {ext}")
+
+        if not target.is_file():
+            raise _HttpError(404, f"static file not found: {unquoted}")
+
+        try:
+            body = target.read_bytes()
+        except OSError:
+            raise _HttpError(500, "failed to read static file")
+
+        content_type = STATIC_EXTENSION_MIME[ext]
+        self._send_bytes(200, body, content_type)
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(
             payload, ensure_ascii=False, allow_nan=False

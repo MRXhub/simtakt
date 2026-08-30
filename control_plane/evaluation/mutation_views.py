@@ -12,6 +12,8 @@ from control_plane.core.evaluation_contracts import (
     make_problem_definition,
 )
 
+from control_plane.simulation.deck_parameters import parse_deck_parameters
+from control_plane.evaluation.parameter_schema import validate_parameters
 _BUILDERS: dict[str, Callable[..., dict[str, Any]]] = {
     "problem": make_problem_definition,
     "candidate": make_candidate,
@@ -69,3 +71,30 @@ def submit_evaluation(middleware: Any, body: Any) -> dict[str, Any]:
         raise ContractError("candidate and request are required")
     study_id = source.get("study_id")
     return middleware.submit(source["candidate"], source["request"], study_id=study_id)
+def parse_deck(body: Any) -> dict[str, Any]:
+    source = _object(body, "parse request")
+    if "deck_text" not in source:
+        raise ContractError("deck_text is required")
+    deck_text = source.get("deck_text")
+    if not isinstance(deck_text, str):
+        raise ContractError("deck_text must be a string")
+    return parse_deck_parameters(deck_text)
+
+
+def register_schema(middleware: Any, body: Any) -> dict[str, Any]:
+    source = _object(body, "ParameterSchema")
+    record = middleware.register_schema(source)
+    return {"revision": record["revision"]}
+
+
+def validate_candidate_parameters(middleware: Any, body: Any) -> dict[str, Any]:
+    source = _object(body, "candidate validation request")
+    if "schema_revision" not in source or "parameters" not in source:
+        raise ContractError("schema_revision and parameters are required")
+    schema_revision = str(source["schema_revision"]).strip().lower()
+    raw_params = source["parameters"]
+    if not isinstance(raw_params, Mapping):
+        raise ContractError("parameters must be an object")
+    schema_doc = middleware.get_schema(schema_revision)
+    schema_data = schema_doc.get("schema", schema_doc)
+    return validate_parameters(schema_data, dict(raw_params))
