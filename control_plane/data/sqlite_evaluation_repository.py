@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 from control_plane.core.evaluation_contracts import (
+    ACTIVE_ATTEMPT_STATES,
+    CAPACITY_HOLDING_ATTEMPT_STATES,
+    HEARTBEATABLE_ATTEMPT_STATES,
     ContractError,
+    attempt_states_sql,
     canonical_json,
     make_attempt,
     normalize_token,
@@ -47,6 +51,9 @@ from control_plane.evaluation.compute_profile import (
 from control_plane.evaluation.execution_planning import materialize_session_plan
 from control_plane.evaluation.automation_policy import DEFAULT_AUTOMATION_POLICY, most_conservative
 from control_plane.evaluation.scheduling import SchedulingError, validate_resource_allocation
+_ACTIVE_ATTEMPT_STATES_SQL = attempt_states_sql(ACTIVE_ATTEMPT_STATES)
+_CAPACITY_HOLDING_ATTEMPT_STATES_SQL = attempt_states_sql(CAPACITY_HOLDING_ATTEMPT_STATES)
+_HEARTBEATABLE_ATTEMPT_STATES_SQL = attempt_states_sql(HEARTBEATABLE_ATTEMPT_STATES)
 from control_plane.simulation.session_contracts import validate_simulation_session_plan
 
 
@@ -498,17 +505,39 @@ class SQLiteEvaluationRepository:
                 ON attempts(session_ref) WHERE session_ref IS NOT NULL
                 """
             )
-            connection.execute(
-                "DROP INDEX IF EXISTS idx_attempts_execution_preparation"
-            )
-            connection.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_attempts_active_preparation
-                ON attempts(execution_preparation_id)
-                WHERE execution_preparation_id IS NOT NULL
-                  AND status IN ('planned', 'leased', 'running', 'reconciling', 'collecting')
-                """
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                expected_index_sql = (
+                    "CREATE UNIQUE INDEX idx_attempts_active_preparation "
+                    "ON attempts(execution_preparation_id) "
+                    "WHERE execution_preparation_id IS NOT NULL "
+                    f"AND status IN ({_ACTIVE_ATTEMPT_STATES_SQL})"
+                )
+                existing_index = connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' "
+                    "AND name='idx_attempts_active_preparation'"
+                ).fetchone()
+                normalize_sql = lambda sql: re.sub(r"\s+", " ", str(sql or "")).strip().lower()
+                if normalize_sql(existing_index["sql"] if existing_index else "") != normalize_sql(
+                    expected_index_sql
+                ):
+                    connection.execute(
+                        "DROP INDEX IF EXISTS idx_attempts_execution_preparation"
+                    )
+                    connection.execute(
+                        "DROP INDEX IF EXISTS idx_attempts_active_preparation"
+                    )
+                    try:
+                        connection.execute(expected_index_sql)
+                    except sqlite3.DatabaseError as exc:
+                        raise RepositoryError(
+                            "failed to rebuild idx_attempts_active_preparation "
+                            f"with expected predicate: {exc}"
+                        ) from exc
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
@@ -1526,10 +1555,10 @@ class SQLiteEvaluationRepository:
         if evaluation["status"] != "queued":
             raise RepositoryError("Attempt can be scheduled only for a queued Evaluation")
         active = connection.execute(
-            """
+            f"""
             SELECT * FROM attempts
             WHERE evaluation_id = ?
-              AND status IN ('planned', 'leased', 'running', 'reconciling', 'collecting')
+              AND status IN ({_ACTIVE_ATTEMPT_STATES_SQL})
             """,
             (evaluation_id,),
         ).fetchone()
@@ -1689,12 +1718,12 @@ class SQLiteEvaluationRepository:
     ) -> dict[str, Any]:
         identity = str(normalized["preparation_id"])
         existing = connection.execute(
-            """
+            f"""
             SELECT a.*, e.candidate_id AS evaluation_candidate_id
             FROM attempts a
             JOIN evaluations e ON e.evaluation_id = a.evaluation_id
             WHERE a.execution_preparation_id = ?
-              AND a.status IN ('planned', 'leased', 'running', 'reconciling', 'collecting')
+              AND a.status IN ({_ACTIVE_ATTEMPT_STATES_SQL})
             """,
             (identity,),
         ).fetchone()
@@ -1721,10 +1750,10 @@ class SQLiteEvaluationRepository:
                 "execution preparation references a different Candidate"
             )
         active = connection.execute(
-            """
+            f"""
             SELECT attempt_id, execution_preparation_id FROM attempts
             WHERE evaluation_id = ?
-              AND status IN ('planned', 'leased', 'running', 'reconciling', 'collecting')
+              AND status IN ({_ACTIVE_ATTEMPT_STATES_SQL})
             """,
             (normalized["evaluation_id"],),
         ).fetchone()
@@ -1798,10 +1827,10 @@ class SQLiteEvaluationRepository:
                 "execution preparation does not match the scheduled Attempt"
             )
         collision = connection.execute(
-            """
+            f"""
             SELECT attempt_id FROM attempts
             WHERE execution_preparation_id = ? AND attempt_id <> ?
-              AND status IN ('planned', 'leased', 'running', 'reconciling', 'collecting')
+              AND status IN ({_ACTIVE_ATTEMPT_STATES_SQL})
             """,
             (identity, attempt_id),
         ).fetchone()
@@ -1848,7 +1877,7 @@ class SQLiteEvaluationRepository:
         ):
             raise RepositoryError("queue limit must be a positive integer or None")
         timestamp = _iso(_utc_now() if now is None else now)
-        statement = """
+        statement = f"""
             SELECT e.* FROM evaluations e
             LEFT JOIN preparation_claims pc ON pc.evaluation_id = e.evaluation_id
             WHERE e.status = 'queued'
@@ -1856,9 +1885,7 @@ class SQLiteEvaluationRepository:
               AND NOT EXISTS (
                   SELECT 1 FROM attempts a
                   WHERE a.evaluation_id = e.evaluation_id
-                    AND a.status IN (
-                        'planned', 'leased', 'running', 'reconciling', 'collecting'
-                    )
+                    AND a.status IN ({_ACTIVE_ATTEMPT_STATES_SQL})
               )
             ORDER BY e.created_at, e.evaluation_id
         """
@@ -1881,7 +1908,7 @@ class SQLiteEvaluationRepository:
         timestamp: str,
     ) -> None:
         stale = connection.execute(
-            """
+            f"""
             SELECT pc.*, e.status AS evaluation_status
             FROM preparation_claims pc
             JOIN evaluations e ON e.evaluation_id = pc.evaluation_id
@@ -1890,9 +1917,7 @@ class SQLiteEvaluationRepository:
                OR EXISTS (
                    SELECT 1 FROM attempts a
                    WHERE a.evaluation_id = pc.evaluation_id
-                     AND a.status IN (
-                         'planned', 'leased', 'running', 'reconciling', 'collecting'
-                     )
+                     AND a.status IN ({_ACTIVE_ATTEMPT_STATES_SQL})
                )
             ORDER BY pc.created_at, pc.claim_id
             """,
@@ -1934,12 +1959,10 @@ class SQLiteEvaluationRepository:
     ) -> int:
         prepared_attempts = int(
             connection.execute(
-                """
+                f"""
                 SELECT COUNT(*) FROM attempts
                 WHERE execution_preparation_id IS NOT NULL
-                  AND status IN (
-                      'planned', 'leased', 'running', 'reconciling', 'collecting'
-                  )
+                  AND status IN ({_ACTIVE_ATTEMPT_STATES_SQL})
                 """
             ).fetchone()[0]
         )
@@ -2031,12 +2054,10 @@ class SQLiteEvaluationRepository:
                 if available == 0 or evaluation["status"] != "queued":
                     continue
                 active = connection.execute(
-                    """
+                    f"""
                     SELECT 1 FROM attempts
                     WHERE evaluation_id = ?
-                      AND status IN (
-                          'planned', 'leased', 'running', 'reconciling', 'collecting'
-                      )
+                      AND status IN ({_ACTIVE_ATTEMPT_STATES_SQL})
                     """,
                     (evaluation_id,),
                 ).fetchone()
@@ -2853,9 +2874,9 @@ class SQLiteEvaluationRepository:
         target = None if target_id is None else normalize_token(target_id, "target_id")
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT allocation_json, execution_preparation_json FROM attempts
-                WHERE status IN ('leased', 'running', 'collecting', 'reconciling')
+                WHERE status IN ({_CAPACITY_HOLDING_ATTEMPT_STATES_SQL})
                   AND allocation_json IS NOT NULL
                 ORDER BY created_at, attempt_id
                 """
@@ -3116,9 +3137,9 @@ class SQLiteEvaluationRepository:
             if license_sessions is not None:
                 active_count = int(
                     connection.execute(
-                        """
+                        f"""
                         SELECT COUNT(*) FROM attempts
-                        WHERE status IN ('leased', 'running', 'collecting', 'reconciling')
+                        WHERE status IN ({_CAPACITY_HOLDING_ATTEMPT_STATES_SQL})
                           AND allocation_json IS NOT NULL
                         """
                     ).fetchone()[0]
@@ -3443,7 +3464,7 @@ class SQLiteEvaluationRepository:
         current = _utc_now() if now is None else now
         with self._transaction() as connection:
             row = self._owned_attempt(connection, attempt_id, worker_id, now=current)
-            if row["status"] not in {"leased", "running", "collecting"}:
+            if row["status"] not in HEARTBEATABLE_ATTEMPT_STATES:
                 raise RepositoryError("terminal Attempt cannot renew a lease")
             connection.execute(
                 """
@@ -4134,9 +4155,9 @@ class SQLiteEvaluationRepository:
         expired_ids: list[str] = []
         with self._transaction() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM attempts
-                WHERE status IN ('leased', 'running', 'reconciling', 'collecting')
+                WHERE status IN ({_CAPACITY_HOLDING_ATTEMPT_STATES_SQL})
                   AND lease_expires_at <= ?
                 ORDER BY lease_expires_at, attempt_id
                 """,

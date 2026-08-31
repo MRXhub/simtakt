@@ -39,6 +39,38 @@ ATTEMPT_STATES = frozenset(
         "cancelled",
     }
 )
+# States in which an Attempt is active and blocks preparation reuse; unlike capacity states this includes planned.
+ACTIVE_ATTEMPT_STATES = frozenset(
+    {"planned", "leased", "running", "reconciling", "collecting"}
+)
+# States that retain a capacity allocation; unlike active states, planned is excluded because it has not acquired capacity.
+CAPACITY_HOLDING_ATTEMPT_STATES = frozenset(
+    {"leased", "running", "collecting", "reconciling"}
+)
+# States whose owner is expected to renew a lease; unlike capacity states, reconciling is excluded because it is observer-owned.
+HEARTBEATABLE_ATTEMPT_STATES = frozenset({"leased", "running", "collecting"})
+
+
+_ATTEMPT_STATE_SQL_ORDER = (
+    "planned",
+    "leased",
+    "running",
+    "reconciling",
+    "collecting",
+    "completed",
+    "failed",
+    "lost",
+    "cancelled",
+)
+
+
+def attempt_states_sql(states: frozenset[str]) -> str:
+    """Render attempt states as deterministic SQL string literals."""
+    return ", ".join(
+        f"'{state}'"
+        for state in _ATTEMPT_STATE_SQL_ORDER
+        if state in states
+    )
 QUALIFICATION_STATES = frozenset({"qualified", "ambiguous", "rejected"})
 ALGORITHM_RUN_STATES = frozenset({"active", "completed", "blocked", "failed"})
 ALGORITHM_RETENTION_CLASSES = frozenset(
