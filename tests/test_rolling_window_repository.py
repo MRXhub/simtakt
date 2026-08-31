@@ -12,8 +12,13 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
-
 from control_plane.core.evaluation_contracts import (
+    ACTIVE_ATTEMPT_STATES,
+    ATTEMPT_STATES,
+    CAPACITY_HOLDING_ATTEMPT_STATES,
+    HEARTBEATABLE_ATTEMPT_STATES,
+    _ATTEMPT_STATE_SQL_ORDER,
+    attempt_states_sql,
     make_candidate,
     make_evaluation_request,
     make_problem_definition,
@@ -826,6 +831,156 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             )
         self.assertEqual(
             self.claim([first], window_limit=1)[0]["claim_id"], claim["claim_id"]
+        )
+    def _sqlite_index(self) -> tuple[str, int]:
+        with closing(sqlite3.connect(self.database)) as connection:
+            return connection.execute(
+                "SELECT sql, rootpage FROM sqlite_master "
+                "WHERE type='index' AND name='idx_attempts_active_preparation'"
+            ).fetchone()
+
+    def test_v11_database_is_upgraded_to_v12_index_and_heartbeat_column(self) -> None:
+        # Downgrade only metadata and the index; this exercises repository startup
+        # rather than manually simulating migration code.
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DELETE FROM schema_migrations WHERE version = 12")
+            connection.execute("DROP INDEX idx_attempts_active_preparation")
+            connection.execute(
+                "CREATE UNIQUE INDEX idx_attempts_active_preparation "
+                "ON attempts(execution_preparation_id) "
+                "WHERE execution_preparation_id IS NOT NULL "
+                "AND status IN ('planned', 'leased', 'running', 'collecting', 'reconciling')"
+            )
+            connection.commit()
+        SQLiteEvaluationRepository(self.database)
+        sql, _ = self._sqlite_index()
+        self.assertIn("starting", sql.lower())
+        self.assertIn("unconfirmed", sql.lower())
+        with closing(sqlite3.connect(self.database)) as connection:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(attempts)")
+            }
+            versions = {
+                row[0] for row in connection.execute("SELECT version FROM schema_migrations")
+            }
+        self.assertIn("last_heartbeat_at", columns)
+        self.assertIn(12, versions)
+
+    def test_v12_initialization_is_idempotent_without_rebuilding_index(self) -> None:
+        before_sql, before_rootpage = self._sqlite_index()
+        SQLiteEvaluationRepository(self.database)
+        after_sql, after_rootpage = self._sqlite_index()
+        self.assertEqual(before_sql, after_sql)
+        self.assertEqual(before_rootpage, after_rootpage)
+        self.assertIn("starting", after_sql.lower())
+        self.assertIn("unconfirmed", after_sql.lower())
+
+    def _duplicate_attempt_with_status(self, status: str, suffix: str) -> tuple[str, str]:
+        attempt = self.prepare(self.submit(), window_limit=3)
+        duplicate = f"attempt:duplicate-{suffix}"
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE attempts SET status=? WHERE attempt_id=?",
+                (status, attempt["attempt_id"]),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO attempts "
+                    "SELECT ?, evaluation_id, attempt_number + 100, simulation_adapter, "
+                    "numerical_profile, checkpoint_parent_attempt_id, ?, failure_class, "
+                    "artifact_ids_json, lease_owner, lease_expires_at, session_ref, "
+                    "last_heartbeat_at, execution_preparation_id, execution_preparation_json, "
+                    "selected_execution_option_id, execution_plan_id, execution_plan_json, "
+                    "allocation_json, created_at, updated_at, feedback_json, feedback_recorded_at "
+                    "FROM attempts WHERE attempt_id=?",
+                    (duplicate, status, attempt["attempt_id"]),
+                )
+            connection.rollback()
+        return attempt["attempt_id"], duplicate
+
+    def test_starting_and_unconfirmed_are_unique_active_preparations(self) -> None:
+        for status in ("starting", "unconfirmed"):
+            self._duplicate_attempt_with_status(status, status)
+
+    def test_terminal_attempt_does_not_conflict_on_preparation(self) -> None:
+        attempt = self.prepare(self.submit())
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE attempts SET status='starting' WHERE attempt_id=?",
+                (attempt["attempt_id"],),
+            )
+            connection.execute(
+                "INSERT INTO attempts "
+                "SELECT ?, evaluation_id, attempt_number + 100, simulation_adapter, "
+                "numerical_profile, checkpoint_parent_attempt_id, 'failed', failure_class, "
+                "artifact_ids_json, lease_owner, lease_expires_at, session_ref, "
+                "last_heartbeat_at, execution_preparation_id, execution_preparation_json, "
+                "selected_execution_option_id, execution_plan_id, execution_plan_json, "
+                "allocation_json, created_at, updated_at, feedback_json, feedback_recorded_at "
+                "FROM attempts WHERE attempt_id=?",
+                ("attempt:terminal-duplicate", attempt["attempt_id"]),
+            )
+            connection.commit()
+
+    def test_new_states_are_in_active_allocation_projection(self) -> None:
+        for status in ("starting", "unconfirmed"):
+            attempt = self.lease(
+                self.prepare(self.submit(), window_limit=3), now=BASE_TIME
+            )
+            with closing(sqlite3.connect(self.database)) as connection:
+                connection.execute(
+                    "UPDATE attempts SET status=? WHERE attempt_id=?",
+                    (status, attempt["attempt_id"]),
+                )
+                connection.commit()
+            ids = {row["attempt_id"] for row in self.repository.list_active_allocations()}
+            self.assertIn(attempt["attempt_id"], ids)
+
+        planned = self.lease(
+            self.prepare(self.submit(), window_limit=4), now=BASE_TIME
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE attempts SET status='planned' WHERE attempt_id=?",
+                (planned["attempt_id"],),
+            )
+            connection.commit()
+        self.assertNotIn(
+            planned["attempt_id"],
+            {row["attempt_id"] for row in self.repository.list_active_allocations()},
+        )
+
+    def test_attempt_state_constant_invariants(self) -> None:
+        self.assertTrue({"starting", "unconfirmed"} <= ATTEMPT_STATES)
+        self.assertTrue({"starting", "unconfirmed"} <= ACTIVE_ATTEMPT_STATES)
+        self.assertTrue({"starting", "unconfirmed"} <= CAPACITY_HOLDING_ATTEMPT_STATES)
+        self.assertIn("starting", HEARTBEATABLE_ATTEMPT_STATES)
+        # An unconfirmed attempt has no confirmed owner, so cannot heartbeat.
+        self.assertNotIn("unconfirmed", HEARTBEATABLE_ATTEMPT_STATES)
+        self.assertNotIn("planned", CAPACITY_HOLDING_ATTEMPT_STATES)
+        self.assertNotIn("reconciling", HEARTBEATABLE_ATTEMPT_STATES)
+        outputs = [attempt_states_sql(ATTEMPT_STATES) for _ in range(3)]
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(outputs[1], outputs[2])
+        self.assertEqual(
+            outputs[0],
+            ", ".join(f"'{state}'" for state in _ATTEMPT_STATE_SQL_ORDER),
+        )
+
+    def test_heartbeat_writes_last_heartbeat_at(self) -> None:
+        attempt = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+        renewed_at = BASE_TIME + timedelta(seconds=30)
+        renewed = self.repository.heartbeat(
+            attempt["attempt_id"], WORKER, 300, now=renewed_at
+        )
+        self.assertEqual(
+            datetime.fromisoformat(renewed["last_heartbeat_at"]), renewed_at
+        )
+        self.assertGreater(
+            datetime.fromisoformat(renewed["last_heartbeat_at"]),
+            datetime.fromisoformat(attempt["last_heartbeat_at"])
+            if attempt["last_heartbeat_at"] is not None
+            else BASE_TIME - timedelta(seconds=1),
         )
 
 
