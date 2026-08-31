@@ -17,9 +17,9 @@ from control_plane.core.evaluation_contracts import (
     ACTIVE_ATTEMPT_STATES,
     CAPACITY_HOLDING_ATTEMPT_STATES,
     HEARTBEATABLE_ATTEMPT_STATES,
+    TERMINATION_REQUEST_SOURCE_STATES,
     ContractError,
     attempt_states_sql,
-    canonical_json,
     make_attempt,
     normalize_token,
     validate_algorithm_event,
@@ -57,7 +57,7 @@ _HEARTBEATABLE_ATTEMPT_STATES_SQL = attempt_states_sql(HEARTBEATABLE_ATTEMPT_STA
 from control_plane.simulation.session_contracts import validate_simulation_session_plan
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 _SHA256_REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -220,6 +220,7 @@ class SQLiteEvaluationRepository:
                     numerical_profile TEXT NOT NULL,
                     checkpoint_parent_attempt_id TEXT,
                     status TEXT NOT NULL,
+                    termination_state TEXT,
                     failure_class TEXT,
                     artifact_ids_json TEXT NOT NULL,
                     lease_owner TEXT,
@@ -375,6 +376,10 @@ class SQLiteEvaluationRepository:
                         str(row["name"])
                         for row in connection.execute("PRAGMA table_info(attempts)")
                     }
+                    if "termination_state" not in columns:
+                        connection.execute(
+                            "ALTER TABLE attempts ADD COLUMN termination_state TEXT"
+                        )
                     if "session_ref" not in columns:
                         connection.execute("ALTER TABLE attempts ADD COLUMN session_ref TEXT")
                     if "execution_plan_id" not in columns:
@@ -491,7 +496,17 @@ class SQLiteEvaluationRepository:
                             registered_at TEXT NOT NULL
                         )"""
                     )
-                    if existing is None or int(existing["version"]) != SCHEMA_VERSION:
+                    if existing is None:
+                        connection.execute(
+                            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                            (SCHEMA_VERSION, _iso()),
+                        )
+                    elif int(existing["version"]) != SCHEMA_VERSION:
+                        if int(existing["version"]) < 12:
+                            connection.execute(
+                                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                (12, _iso()),
+                            )
                         connection.execute(
                             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                             (SCHEMA_VERSION, _iso()),
@@ -3906,14 +3921,19 @@ class SQLiteEvaluationRepository:
     ) -> None:
         """Apply the existing lost transition and its Evaluation semantics."""
         attempt_id = str(row["attempt_id"])
+        termination_state = (
+            "requested"
+            if str(row["status"]) in TERMINATION_REQUEST_SOURCE_STATES
+            else None
+        )
         connection.execute(
             """
             UPDATE attempts
-            SET failure_class = ?, lease_owner = NULL,
+            SET failure_class = ?, termination_state = ?, lease_owner = NULL,
                 lease_expires_at = NULL, updated_at = ?
             WHERE attempt_id = ?
             """,
-            (failure_class, created_at, attempt_id),
+            (failure_class, termination_state, created_at, attempt_id),
         )
         cls._transition_attempt(
             connection,
@@ -4050,13 +4070,19 @@ class SQLiteEvaluationRepository:
                 raise RepositoryError("terminal Attempt receipt cannot be overwritten")
             self._owned_attempt(connection, attempt_id, worker_id, now=now)
             timestamp = _iso(_utc_now() if now is None else now)
+            termination_state = (
+                "requested"
+                if str(row["status"]) in TERMINATION_REQUEST_SOURCE_STATES
+                else None
+            )
             connection.execute(
                 """
                 UPDATE attempts
-                SET failure_class = ?, artifact_ids_json = ?, updated_at = ?
+                SET failure_class = ?, artifact_ids_json = ?, termination_state = ?,
+                    updated_at = ?
                 WHERE attempt_id = ?
                 """,
-                (failure, canonical_json(artifacts), timestamp, attempt_id),
+                (failure, canonical_json(artifacts), termination_state, timestamp, attempt_id),
             )
             self._transition_attempt(
                 connection,
@@ -4585,6 +4611,7 @@ class SQLiteEvaluationRepository:
             "numerical_profile": str(row["numerical_profile"]),
             "checkpoint_parent_attempt_id": row["checkpoint_parent_attempt_id"],
             "status": str(row["status"]),
+            "termination_state": row["termination_state"],
             "failure_class": row["failure_class"],
             "artifact_ids": json.loads(row["artifact_ids_json"]),
         }

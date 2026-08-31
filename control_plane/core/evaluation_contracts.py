@@ -41,6 +41,25 @@ ATTEMPT_STATES = frozenset(
         "cancelled",
     }
 )
+# Attempt termination states: requested means control-plane termination was issued;
+# confirmed means the remote side acknowledged it; absent means it is gone; unknown means unverified.
+ATTEMPT_TERMINATION_STATES = frozenset({"requested", "confirmed", "absent", "unknown"})
+_ATTEMPT_TERMINATION_STATE_SQL_ORDER = ("requested", "confirmed", "absent", "unknown")
+
+
+def attempt_termination_states_sql(states: frozenset[str]) -> str:
+    """Render attempt termination states as deterministic SQL string literals."""
+    return ", ".join(
+        f"'{state}'"
+        for state in _ATTEMPT_TERMINATION_STATE_SQL_ORDER
+        if state in states
+    )
+
+# Attempt states whose terminal transition records a requested termination.
+TERMINATION_REQUEST_SOURCE_STATES = frozenset(
+    {"starting", "running", "collecting", "reconciling"}
+)
+
 # States in which an Attempt is active and blocks preparation reuse; starting and
 # unconfirmed are included because dispatch work is in-flight before lease confirmation.
 ACTIVE_ATTEMPT_STATES = frozenset(
@@ -376,6 +395,7 @@ def make_attempt(
     simulation_adapter: str,
     numerical_profile: str,
     checkpoint_parent_attempt_id: str | None = None,
+    termination_state: str | None = None,
     attempt_id: str | None = None,
 ) -> dict[str, Any]:
     if isinstance(attempt_number, bool) or not isinstance(attempt_number, int) or attempt_number < 1:
@@ -402,6 +422,7 @@ def make_attempt(
         "numerical_profile": _text(numerical_profile, "numerical_profile"),
         "checkpoint_parent_attempt_id": parent,
         "status": "planned",
+        "termination_state": termination_state,
         "failure_class": None,
         "artifact_ids": [],
     }
@@ -415,19 +436,22 @@ def validate_attempt(value: Any) -> dict[str, Any]:
         simulation_adapter=source.get("simulation_adapter"),
         numerical_profile=source.get("numerical_profile"),
         checkpoint_parent_attempt_id=source.get("checkpoint_parent_attempt_id"),
+        termination_state=source.get("termination_state"),
         attempt_id=source.get("attempt_id"),
     )
     status = str(source.get("status", "")).strip().lower()
     if status not in ATTEMPT_STATES:
         raise ContractError("Attempt status is invalid")
+    termination_state = source.get("termination_state")
+    if termination_state is not None:
+        termination_state = str(termination_state).strip().lower()
+        if termination_state not in ATTEMPT_TERMINATION_STATES:
+            raise ContractError("Attempt termination_state is invalid")
     failure_class = source.get("failure_class")
-    if status in {"failed", "lost"}:
-        failure_class = _text(failure_class, "failure_class")
-    elif failure_class is not None:
-        raise ContractError("Only failed or lost Attempts may have failure_class")
     artifact_ids = _unique_tokens(source.get("artifact_ids"), "artifact_ids", allow_empty=True)
     expected.update(
         status=status,
+        termination_state=termination_state,
         failure_class=failure_class,
         artifact_ids=artifact_ids,
     )
