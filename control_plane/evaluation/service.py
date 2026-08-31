@@ -700,6 +700,17 @@ class EvaluationMiddleware:
             now=now,
         )
 
+    def confirm_attempt_start(
+        self,
+        attempt_id: str,
+        dispatcher_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        return self._repository.confirm_attempt_start(
+            attempt_id, dispatcher_id, now=now
+        )
+
     def lease_next_reconciliation(
         self,
         observer_id: str,

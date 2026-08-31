@@ -3227,14 +3227,63 @@ class SQLiteEvaluationRepository:
                 connection,
                 attempt_id=attempt_id,
                 expected=("leased",),
-                target="running",
-                event_type="AttemptStarted",
+                target="starting",
+                event_type="AttemptStarting",
                 payload={
                     "dispatcher_id": dispatcher,
                     "session_ref": normalized_allocation["session_ref"],
                     "execution_plan_id": plan["plan_id"],
                     "allocation_id": normalized_allocation["allocation_id"],
                 },
+                created_at=timestamp,
+            )
+            return self.get_attempt(attempt_id, connection=connection)
+
+    def confirm_attempt_start(
+        self,
+        attempt_id: str,
+        dispatcher_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """CAS-confirm that the worker accepted a durably claimed session."""
+        dispatcher = str(dispatcher_id).strip()
+        if not dispatcher:
+            raise RepositoryError("dispatcher_id is required")
+        current = _utc_now() if now is None else now
+        timestamp = _iso(current)
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if row is None:
+                raise RepositoryError(f"unknown Attempt: {attempt_id}")
+            if row["status"] != "starting":
+                raise RepositoryError(
+                    f"Attempt {attempt_id} is {row['status']}; launch confirmation requires starting"
+                )
+            if row["lease_owner"] != dispatcher:
+                raise RepositoryError("launch confirmation requires the claiming dispatcher")
+            updated = connection.execute(
+                """
+                UPDATE attempts SET status = 'running', updated_at = ?
+                WHERE attempt_id = ? AND status = 'starting' AND lease_owner = ?
+                """,
+                (timestamp, attempt_id, dispatcher),
+            )
+            if updated.rowcount != 1:
+                raise RepositoryError("Attempt changed before launch confirmation")
+            self._state_event(
+                connection,
+                aggregate_type="attempt",
+                payload={
+                    "dispatcher_id": dispatcher,
+                    "reason": "launch_confirmed",
+                    "outcome": "launch_confirmed",
+                },
+                from_status="starting",
+                to_status="running",
+                event_type="AttemptStarted",
                 created_at=timestamp,
             )
             return self.get_attempt(attempt_id, connection=connection)
@@ -3975,7 +4024,7 @@ class SQLiteEvaluationRepository:
             self._transition_attempt(
                 connection,
                 attempt_id=attempt_id,
-                expected=("leased", "running", "collecting", "reconciling"),
+                expected=("starting", "leased", "running", "collecting", "reconciling"),
                 target="failed",
                 event_type="AttemptFailed",
                 payload={"failure_class": failure, "artifact_ids": artifacts},
@@ -4027,7 +4076,7 @@ class SQLiteEvaluationRepository:
                     raise RepositoryError("reconciling Attempt evidence cannot be overwritten")
                 return self._attempt_record(row)
             self._owned_attempt(connection, attempt_id, worker_id, now=now)
-            if row["status"] not in {"running", "collecting"}:
+            if row["status"] not in {"starting", "running", "collecting"}:
                 raise RepositoryError("only a started Attempt can require reconciliation")
             timestamp = _iso(_utc_now() if now is None else now)
             connection.execute(

@@ -29,10 +29,20 @@ from control_plane.evaluation.scheduling import (
     scheduling_decision_plain,
 )
 from control_plane.evaluation.scheduling_policy import GovernedSchedulingPolicy
-from control_plane.simulation.worker import SessionStartFailure
-
+from control_plane.simulation.worker import SESSION_START_OUTCOMES, SessionStartFailure
 
 MAX_PREPARED_CANDIDATE_WINDOW = 64
+_SESSION_START_OUTCOME_PATHS = {
+    "not_started": "fail",
+    "preflight_failed": "fail",
+    "absent": "fail",
+    "unreachable": "reconcile",
+    "launch_confirmed": "confirm",
+    "indeterminate": "reconcile",
+}
+if set(_SESSION_START_OUTCOME_PATHS) != set(SESSION_START_OUTCOMES):
+    raise RuntimeError("SESSION_START_OUTCOMES lacks an explicit dispatcher path")
+
 
 
 class ScheduleOverrideProvider(Protocol):
@@ -327,20 +337,25 @@ class PreparedExecutionDispatcher(SessionLifecycleDispatcher):
                     stored_plan, stored_allocation, stored_session_ref
                 )
             except SessionStartFailure as exc:
-                if exc.outcome == "indeterminate":
+                path = _SESSION_START_OUTCOME_PATHS.get(exc.outcome)
+                if path == "reconcile":
                     self.middleware.require_reconciliation(
                         selected_id,
                         self.dispatcher_id,
-                        reason="worker-start-indeterminate",
+                        reason="worker-start-" + exc.outcome,
                         now=current_time,
                     )
-                else:
+                elif path == "fail":
                     self.middleware.fail_attempt(
                         selected_id,
                         self.dispatcher_id,
                         exc.failure_class,
                         now=current_time,
                     )
+                else:
+                    raise DispatchError(
+                        f"unhandled SessionStartFailure outcome: {exc.outcome}"
+                    ) from exc
                 return self.middleware.get_attempt(selected_id)
             except Exception:
                 self.middleware.require_reconciliation(
@@ -350,8 +365,9 @@ class PreparedExecutionDispatcher(SessionLifecycleDispatcher):
                     now=current_time,
                 )
                 raise
-            return self.middleware.get_attempt(selected_id)
-
+            return self.middleware.confirm_attempt_start(
+                selected_id, self.dispatcher_id, now=current_time
+            )
     def _governed_preparation(
         self,
         value: Mapping[str, Any],
