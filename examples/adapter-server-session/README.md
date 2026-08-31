@@ -27,6 +27,10 @@ criteria; and result export/materialization as a verifiable artifact.
 For comparison, COMSOL documents batch execution using a command-line shape
 such as `comsol batch -inputfile model.mph -outputfile out.mph`:
 [COMSOL 6.3 command-line documentation](https://doc.comsol.com/6.3/doc/com.comsol.help.comsol/comsol_ref_runningthemodel.37.08.html).
+Key operational considerations in batch mode include:
+- `-nn` controls the number of processes (nodes) and `-np` controls cores per process; total cores ≈ `nn * np`.
+- Omitting `-outputfile` causes COMSOL to directly overwrite the input file, creating data corruption risks.
+
 The exact switches and behavior are version/platform dependent; consult the
 server's documentation for the installed COMSOL version. Batch is a separate
 example shape: a bounded process/job receipt, not a live connection + token
