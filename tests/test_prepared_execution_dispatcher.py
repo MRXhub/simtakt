@@ -43,6 +43,7 @@ from tests.legacy_prebound_middleware_fixture import (
     LegacyEvaluationMiddleware,
 )
 from control_plane.simulation.session_contracts import make_simulation_session_plan
+from control_plane.simulation.worker import SessionStartFailure
 from tests.test_scheduling_policy import write_project
 
 
@@ -244,11 +245,13 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
             )
         )
 
-    def prepare_other_candidate(self, *, target_id: str, processors: int = 2) -> dict:
+    def prepare_other_candidate(
+        self, *, target_id: str, processors: int = 2, parameter_x: float | None = None
+    ) -> dict:
         candidate = make_candidate(
             problem_id=self.candidate["problem_id"],
             problem_revision=self.candidate["problem_revision"],
-            parameters={"x": len(self.middleware.prepared_scheduling_candidates()) + 2.0},
+            parameters={"x": parameter_x if parameter_x is not None else len(self.middleware.prepared_scheduling_candidates()) + 2.0},
         )
         request = make_evaluation_request(
             candidate_id=candidate["candidate_id"],
@@ -264,7 +267,9 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
             candidate_id=candidate["candidate_id"],
         )
 
-    def claim_materials(self, prepared: dict) -> tuple[dict, dict, dict, dict]:
+    def claim_materials(
+        self, prepared: dict, *, session_ref: str = "session-fixture"
+    ) -> tuple[dict, dict, dict, dict]:
         preparation = prepared["execution_preparation"]
         target_id = preparation["execution_option_set"]["options"][0]["target_id"]
         resources = {
@@ -303,13 +308,132 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
         )
         allocation = make_resource_allocation(
             decision,
-            session_ref="session-fixture",
+            session_ref=session_ref,
             run_id="20260731-120000-000",
             remote_workspace_root=resources["remote_workspace_root"],
             decision_artifact_id="evidence.scheduling.fixture",
             decision_artifact_path="decision.json",
         )
         return preparation, option, plan, allocation
+    def claim_starting(
+        self, prepared: dict, *, owner: str = "dispatcher:fixture",
+        session_ref: str = "session-fixture",
+    ) -> dict:
+        preparation, option, plan, allocation = self.claim_materials(
+            prepared, session_ref=session_ref
+        )
+        claimed = self.middleware.claim_prepared_execution(
+            prepared["attempt_id"], owner, 120,
+            preparation_id=preparation["preparation_id"],
+            selected_option_id=option["option_id"],
+            session_plan=plan, allocation=allocation,
+            license_sessions=1,
+            now=datetime.now(timezone.utc),
+        )
+        self.assertIsNotNone(claimed)
+        return claimed
+
+    def test_claim_stops_at_starting_and_persists_allocation(self) -> None:
+        prepared = self.prepare()
+        claimed = self.claim_starting(prepared)
+        stored = self.middleware.get_attempt(prepared["attempt_id"])
+        self.assertEqual(claimed["status"], "starting")
+        self.assertEqual(stored["status"], "starting")
+        self.assertEqual(stored["allocation"], claimed["allocation"])
+        self.assertIsNotNone(stored["allocation"])
+
+    def test_launch_confirmation_reaches_running_and_persists_launch_event(self) -> None:
+        prepared = self.prepare()
+        self.claim_starting(prepared)
+        dispatcher_id = "dispatcher:fixture"
+        confirmed = self.middleware.confirm_attempt_start(
+            prepared["attempt_id"], dispatcher_id
+        )
+        self.assertEqual(confirmed["status"], "running")
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                """SELECT payload_json FROM state_events
+                   WHERE aggregate_type = 'attempt' AND aggregate_id = ?
+                     AND event_type = 'AttemptStarted'
+                   ORDER BY sequence DESC LIMIT 1""",
+                (prepared["attempt_id"],),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        payload = json.loads(row[0])
+        self.assertEqual(payload["reason"], "launch_confirmed")
+        self.assertEqual(payload["outcome"], "launch_confirmed")
+
+
+    def test_unreachable_means_remote_may_have_started_so_reconcile_and_hold_capacity(self) -> None:
+        prepared = self.prepare()
+        worker = RecordingWorker(self.root)
+        worker.start_session = mock.Mock(
+            side_effect=SessionStartFailure("unreachable", "transport", "remote unreachable")
+        )
+        dispatcher = self.dispatcher(FakeResourceMonitor())
+        dispatcher.worker = worker
+        result = dispatcher.dispatch_once(now=datetime.now(timezone.utc))
+        stored = self.middleware.get_attempt(prepared["attempt_id"])
+        self.assertEqual(result[0]["status"], "reconciling")
+        self.assertEqual(stored["status"], "reconciling")
+        self.assertTrue(any(
+            item["attempt_id"] == prepared["attempt_id"]
+            for item in self.middleware.active_allocations()
+        ))
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 1
+            )
+
+    def test_indeterminate_start_failure_enters_reconciliation(self) -> None:
+        prepared = self.prepare()
+        worker = RecordingWorker(self.root)
+        worker.start_session = mock.Mock(
+            side_effect=SessionStartFailure("indeterminate", "transport", "unknown result")
+        )
+        dispatcher = self.dispatcher(FakeResourceMonitor())
+        dispatcher.worker = worker
+        dispatcher.dispatch_once(now=datetime.now(timezone.utc))
+        self.assertEqual(self.middleware.get_attempt(prepared["attempt_id"])["status"], "reconciling")
+
+    def test_deterministic_start_failures_remain_failed(self) -> None:
+        for index, outcome in enumerate(("not_started", "preflight_failed", "absent")):
+            with self.subTest(outcome=outcome):
+                prepared = (
+                    self.prepare()
+                    if index == 0
+                    else self.prepare_other_candidate(target_id=TARGET, parameter_x=index + 2.0)
+                )
+                worker = RecordingWorker(self.root)
+                worker.start_session = mock.Mock(
+                    side_effect=SessionStartFailure(outcome, "deterministic", outcome)
+                )
+                dispatcher = self.dispatcher(FakeResourceMonitor())
+                dispatcher.worker = worker
+                dispatcher.dispatch_once(now=datetime.now(timezone.utc))
+                self.assertEqual(
+                    self.middleware.get_attempt(prepared["attempt_id"])["status"], "failed"
+                )
+
+    def test_launch_confirmation_cas_rejects_nonstarting_and_wrong_owner(self) -> None:
+        prepared = self.prepare()
+        self.claim_starting(prepared)
+        self.middleware.fail_attempt(prepared["attempt_id"], "dispatcher:fixture", "fixture")
+        with self.assertRaisesRegex(Exception, "requires starting"):
+            self.middleware.confirm_attempt_start(prepared["attempt_id"], "dispatcher:fixture")
+        self.assertEqual(self.middleware.get_attempt(prepared["attempt_id"])["status"], "failed")
+
+        second = self.prepare_other_candidate(target_id=TARGET)
+        self.claim_starting(second, owner="dispatcher:right", session_ref="session-second")
+        with self.assertRaisesRegex(Exception, "claiming dispatcher"):
+            self.middleware.confirm_attempt_start(second["attempt_id"], "dispatcher:wrong")
+        self.assertEqual(self.middleware.get_attempt(second["attempt_id"])["status"], "starting")
+
+    def test_starting_attempt_appears_in_active_allocations_and_holds_capacity(self) -> None:
+        prepared = self.prepare()
+        self.claim_starting(prepared)
+        active = self.middleware.active_allocations(TARGET)
+        self.assertEqual([item["attempt_id"] for item in active], [prepared["attempt_id"]])
 
     def test_plan_option_and_allocation_appear_atomically_after_selection(self) -> None:
         prepared = self.prepare()
