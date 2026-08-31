@@ -3276,6 +3276,7 @@ class SQLiteEvaluationRepository:
             self._state_event(
                 connection,
                 aggregate_type="attempt",
+                aggregate_id=attempt_id,
                 payload={
                     "dispatcher_id": dispatcher,
                     "reason": "launch_confirmed",

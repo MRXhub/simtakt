@@ -649,6 +649,9 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
             allocation=allocation,
         )
         self.assertIsNotNone(claimed)
+        self.middleware.confirm_attempt_start(
+            prepared["attempt_id"], "dispatcher:prepared"
+        )
         self.middleware.begin_collection(
             prepared["attempt_id"], "dispatcher:prepared"
         )
@@ -808,7 +811,7 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
 
         self.assertEqual(sum(result is not None for result in results), 1)
         stored = self.middleware.get_attempt(prepared["attempt_id"])
-        self.assertEqual(stored["status"], "running")
+        self.assertEqual(stored["status"], "starting")
         self.assertEqual(stored["selected_execution_option_id"], option["option_id"])
         self.assertEqual(stored["execution_plan"], plan)
         self.assertEqual(stored["allocation"], allocation)

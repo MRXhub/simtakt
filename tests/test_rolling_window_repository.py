@@ -509,7 +509,10 @@ class RollingWindowRepositoryTests(unittest.TestCase):
     def test_completed_and_failed_attempts_each_release_one_window_slot(self) -> None:
         first, second, third = self.submit(), self.submit(), self.submit()
         first_attempt = self.prepare(first, now=BASE_TIME)
-        self.lease(first_attempt, now=BASE_TIME + timedelta(seconds=1))
+        first_attempt = self.lease(first_attempt, now=BASE_TIME + timedelta(seconds=1))
+        self.repository.confirm_attempt_start(
+            first_attempt["attempt_id"], WORKER, now=BASE_TIME + timedelta(seconds=1)
+        )
         self.repository.begin_collection(
             first_attempt["attempt_id"], WORKER, now=BASE_TIME + timedelta(seconds=2)
         )

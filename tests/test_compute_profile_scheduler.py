@@ -352,7 +352,12 @@ class FeedbackRepositoryContractsTests(unittest.TestCase):
             preparation_id=preparation["preparation_id"], selected_option_id=option["option_id"],
             session_plan=plan, allocation=allocation,
         )
-        self.fixture.middleware.begin_collection(prepared["attempt_id"], "dispatcher:fixture")
+        self.fixture.middleware.confirm_attempt_start(
+            prepared["attempt_id"], "dispatcher:fixture"
+        )
+        self.fixture.middleware.begin_collection(
+            prepared["attempt_id"], "dispatcher:fixture"
+        )
         repository.fail_attempt(prepared["attempt_id"], "dispatcher:fixture", "fixture-failure", feedback=observation)
         replay = repository.record_attempt_feedback(prepared["attempt_id"], **observation)
         self.assertEqual(
