@@ -869,7 +869,7 @@ class RollingWindowRepositoryTests(unittest.TestCase):
                 row[0] for row in connection.execute("SELECT version FROM schema_migrations")
             }
         self.assertIn("last_heartbeat_at", columns)
-        self.assertIn(12, versions)
+        self.assertIn(13, versions)
 
     def test_v12_initialization_is_idempotent_without_rebuilding_index(self) -> None:
         before_sql, before_rootpage = self._sqlite_index()
@@ -891,12 +891,12 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute(
                     "INSERT INTO attempts "
+                    "(attempt_id, evaluation_id, attempt_number, simulation_adapter, "
+                    "numerical_profile, status, artifact_ids_json, "
+                    "execution_preparation_id, created_at, updated_at) "
                     "SELECT ?, evaluation_id, attempt_number + 100, simulation_adapter, "
-                    "numerical_profile, checkpoint_parent_attempt_id, ?, failure_class, "
-                    "artifact_ids_json, lease_owner, lease_expires_at, session_ref, "
-                    "last_heartbeat_at, execution_preparation_id, execution_preparation_json, "
-                    "selected_execution_option_id, execution_plan_id, execution_plan_json, "
-                    "allocation_json, created_at, updated_at, feedback_json, feedback_recorded_at "
+                    "numerical_profile, ?, artifact_ids_json, execution_preparation_id, "
+                    "created_at, updated_at "
                     "FROM attempts WHERE attempt_id=?",
                     (duplicate, status, attempt["attempt_id"]),
                 )
@@ -916,12 +916,12 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             )
             connection.execute(
                 "INSERT INTO attempts "
+                "(attempt_id, evaluation_id, attempt_number, simulation_adapter, "
+                "numerical_profile, status, artifact_ids_json, "
+                "execution_preparation_id, created_at, updated_at) "
                 "SELECT ?, evaluation_id, attempt_number + 100, simulation_adapter, "
-                "numerical_profile, checkpoint_parent_attempt_id, 'failed', failure_class, "
-                "artifact_ids_json, lease_owner, lease_expires_at, session_ref, "
-                "last_heartbeat_at, execution_preparation_id, execution_preparation_json, "
-                "selected_execution_option_id, execution_plan_id, execution_plan_json, "
-                "allocation_json, created_at, updated_at, feedback_json, feedback_recorded_at "
+                "numerical_profile, 'failed', artifact_ids_json, "
+                "execution_preparation_id, created_at, updated_at "
                 "FROM attempts WHERE attempt_id=?",
                 ("attempt:terminal-duplicate", attempt["attempt_id"]),
             )

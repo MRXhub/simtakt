@@ -42,9 +42,13 @@ ATTEMPT_STATES = frozenset(
     }
 )
 # Attempt termination states: requested means control-plane termination was issued;
-# confirmed means the remote side acknowledged it; absent means it is gone; unknown means unverified.
-ATTEMPT_TERMINATION_STATES = frozenset({"requested", "confirmed", "absent", "unknown"})
-_ATTEMPT_TERMINATION_STATE_SQL_ORDER = ("requested", "confirmed", "absent", "unknown")
+# confirmed means the remote side acknowledged termination;
+# unavailable means the adapter cannot terminate, so confirmation is impossible and
+# this state is used as evidence when judging whether the session leaked.
+# Cancel failures or uncertain outcomes stay requested and are retried next round;
+# no fourth state is needed.
+ATTEMPT_TERMINATION_STATES = frozenset({"requested", "confirmed", "unavailable"})
+_ATTEMPT_TERMINATION_STATE_SQL_ORDER = ("requested", "confirmed", "unavailable")
 
 
 def attempt_termination_states_sql(states: frozenset[str]) -> str:
