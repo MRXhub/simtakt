@@ -89,18 +89,34 @@ class SessionLifecycleDispatcher:
         self.last_auto_released = []
         self.last_auto_requeued = []
         self.last_triage = []
-        self.middleware.expire_leases(now=now)
+        has_expired = getattr(self.middleware, "has_expired_leases", None)
+        if not callable(has_expired) or has_expired(now=now):
+            self.middleware.expire_leases(now=now)
         auto_release = getattr(self.middleware, "auto_release_wall_budget", None)
         if callable(auto_release):
-            result = auto_release(now=now)
-            if isinstance(result, list):
-                self.last_auto_released = result
+            has_wall = getattr(
+                self.middleware, "has_reconciling_attempts_for_wall_proof", None
+            )
+            if not callable(has_wall) or has_wall():
+                result = auto_release(now=now)
+                if isinstance(result, list):
+                    self.last_auto_released = result
         auto_requeue = getattr(self.middleware, "auto_requeue_recovering", None)
         if callable(auto_requeue):
-            result = auto_requeue(now=now)
-            if isinstance(result, list):
-                self.last_triage = result
-                self.last_auto_requeued = [item for item in result if item.get("action", "requeued") == "requeued"]
+            has_recovering = getattr(self.middleware, "has_recovering_evaluations", None)
+            if not callable(has_recovering) or has_recovering():
+                result = auto_requeue(now=now)
+                if isinstance(result, list):
+                    self.last_triage = result
+                    self.last_auto_requeued = [
+                        item for item in result
+                        if item.get("action", "requeued") == "requeued"
+                    ]
+        has_reconciliation = getattr(
+            self.middleware, "has_reconciliation_candidate", None
+        )
+        if callable(has_reconciliation) and not has_reconciliation():
+            return None
         attempt = self.middleware.lease_next_reconciliation(
             self.dispatcher_id, self.lease_seconds, now=now
         )

@@ -610,11 +610,17 @@ class EvaluationMiddleware:
             stale_seconds, now=now
         )
 
+    def has_reconciling_attempts_for_wall_proof(self) -> bool:
+        return self._repository.has_reconciling_attempts_for_wall_proof()
+
+
     def auto_release_wall_budget(
         self, *, now: datetime | None = None
     ) -> list[dict[str, Any]]:
         """Compute each Attempt's proof from its persisted immutable budget."""
         candidates = self._repository.list_reconciling_attempts_for_wall_proof()
+        if not candidates:
+            return []
         proofs: dict[str, int] = {}
         unreadable_budget_ids: set[str] = set()
         for candidate in candidates:
@@ -649,6 +655,9 @@ class EvaluationMiddleware:
                 result["reason"] = "budget-unavailable"
                 result["budget_status"] = "unreadable"
         return results
+
+    def has_recovering_evaluations(self) -> bool:
+        return self._repository.has_recovering_evaluations()
 
     def auto_requeue_recovering(
         self, *, now: datetime | None = None
@@ -721,6 +730,9 @@ class EvaluationMiddleware:
         return self._repository.lease_next_reconciliation(
             observer_id, lease_seconds, now=now
         )
+
+    def has_reconciliation_candidate(self) -> bool:
+        return self._repository.has_reconciliation_candidate()
 
     def heartbeat(
         self,
@@ -865,6 +877,9 @@ class EvaluationMiddleware:
     ) -> dict[str, Any]:
         """Return the bounded read-only capacity profile snapshot."""
         return self._repository.get_capacity_profile_snapshot(relevant_identities)
+
+    def has_expired_leases(self, *, now: datetime | None = None) -> bool:
+        return self._repository.has_expired_leases(now=now)
 
     def expire_leases(self, *, now: datetime | None = None) -> list[str]:
         return self._repository.expire_leases(now=now)

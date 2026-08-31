@@ -2538,6 +2538,17 @@ class SQLiteEvaluationRepository:
                 )
         return candidates
 
+    def has_reconciling_attempts_for_wall_proof(self) -> bool:
+        """Cheap read-only hint for whether wall-budget recovery may apply."""
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                """
+                SELECT 1 FROM attempts
+                WHERE status = 'reconciling' AND allocation_json IS NOT NULL
+                LIMIT 1
+                """
+            ).fetchone() is not None
+
     def auto_release_wall_budget(
         self,
         proof_seconds_by_attempt: Mapping[str, int],
@@ -2566,6 +2577,8 @@ class SQLiteEvaluationRepository:
         if current.tzinfo is None:
             raise RepositoryError("timestamps must be timezone-aware")
         timestamp = _iso(current)
+        if not self.has_reconciling_attempts_for_wall_proof():
+            return []
         records: list[dict[str, Any]] = []
         with self._transaction() as connection:
             rows = connection.execute(
@@ -2726,6 +2739,7 @@ class SQLiteEvaluationRepository:
         except (KeyError, TypeError, ValueError, ComputeProfileError):
             return None
 
+
     @staticmethod
     def _effective_automation_profile(connection: sqlite3.Connection, evaluation_id: str, default: str) -> str:
         rows = connection.execute(
@@ -2734,6 +2748,13 @@ class SQLiteEvaluationRepository:
                WHERE se.evaluation_id=?""", (evaluation_id,)
         ).fetchall()
         return most_conservative([str(row["automation_profile"] or default) for row in rows], default)
+
+    def has_recovering_evaluations(self) -> bool:
+        """Cheap read-only hint for whether recovery triage may apply."""
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                "SELECT 1 FROM evaluations WHERE status = 'recovering' LIMIT 1"
+            ).fetchone() is not None
 
     def auto_requeue_recovering(
         self, *, now: datetime | None = None,
@@ -2747,6 +2768,8 @@ class SQLiteEvaluationRepository:
         requeue_limit = int(platform.get("requeue_limit", 2))
         tier1_min = int(platform.get("tier1_min_samples", 20))
         timestamp = _iso(_utc_now() if now is None else now)
+        if not self.has_recovering_evaluations():
+            return []
         results: list[dict[str, Any]] = []
         with self._transaction() as connection:
             evaluations = connection.execute(
@@ -3356,6 +3379,17 @@ class SQLiteEvaluationRepository:
             assert leased is not None
             return self._attempt_record(leased)
 
+    def has_reconciliation_candidate(self) -> bool:
+        """Cheap read-only hint for whether an unleased reconciliation exists."""
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                """
+                SELECT 1 FROM attempts
+                WHERE status = 'reconciling' AND lease_owner IS NULL
+                LIMIT 1
+                """
+            ).fetchone() is not None
+
     def lease_next_reconciliation(
         self,
         observer_id: str,
@@ -3374,6 +3408,8 @@ class SQLiteEvaluationRepository:
             raise RepositoryError("lease_seconds must be a positive integer")
         current = _utc_now() if now is None else now
         expires = current + timedelta(seconds=lease_seconds)
+        if not self.has_reconciliation_candidate():
+            return None
         with self._transaction() as connection:
             row = connection.execute(
                 """
@@ -4206,7 +4242,25 @@ class SQLiteEvaluationRepository:
             )
             return self.get_attempt(attempt_id, connection=connection)
 
+    def has_expired_leases(self, *, now: datetime | None = None) -> bool:
+        """Cheap read-only hint for whether lease expiry may apply."""
+        current = _utc_now() if now is None else now
+        if current.tzinfo is None:
+            raise RepositoryError("timestamps must be timezone-aware")
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                f"""
+                SELECT 1 FROM attempts
+                WHERE status IN ({_CAPACITY_HOLDING_ATTEMPT_STATES_SQL})
+                  AND lease_expires_at <= ?
+                LIMIT 1
+                """,
+                (_iso(current),),
+            ).fetchone() is not None
+
     def expire_leases(self, *, now: datetime | None = None) -> list[str]:
+        if not self.has_expired_leases(now=now):
+            return []
         current = _utc_now() if now is None else now
         timestamp = _iso(current)
         expired_ids: list[str] = []
