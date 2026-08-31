@@ -16,10 +16,13 @@ from threading import Barrier
 from control_plane.core.evaluation_contracts import (
     ACTIVE_ATTEMPT_STATES,
     ATTEMPT_STATES,
+    ATTEMPT_TERMINATION_STATES,
     CAPACITY_HOLDING_ATTEMPT_STATES,
     HEARTBEATABLE_ATTEMPT_STATES,
+    TERMINATION_REQUEST_SOURCE_STATES,
     _ATTEMPT_STATE_SQL_ORDER,
     attempt_states_sql,
+    attempt_termination_states_sql,
     make_candidate,
     make_evaluation_request,
     make_problem_definition,
@@ -1130,6 +1133,110 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             dispatcher_id="dispatcher:legacy", lease_seconds=30,
         )
         self.assertIsNone(dispatcher.recover_once(now=BASE_TIME))
+
+    def test_termination_requested_for_starting_running_and_collecting_failures(self) -> None:
+        starting = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+        failed_starting = self.repository.fail_attempt(
+            starting["attempt_id"], WORKER, "preflight_failed", now=BASE_TIME
+        )
+        self.assertEqual(self.repository.get_attempt(starting["attempt_id"])["termination_state"], "requested")
+        self.assertEqual(failed_starting["status"], "failed")
+
+        running = self.lease(self.prepare(self.submit(), window_limit=2), now=BASE_TIME)
+        self.repository.confirm_attempt_start(running["attempt_id"], WORKER, now=BASE_TIME)
+        failed_running = self.repository.fail_attempt(
+            running["attempt_id"], WORKER, "runtime_failed", now=BASE_TIME
+        )
+        self.assertEqual(self.repository.get_attempt(running["attempt_id"])["termination_state"], "requested")
+        self.assertEqual(failed_running["status"], "failed")
+
+        collecting = self.lease(self.prepare(self.submit(), window_limit=3), now=BASE_TIME)
+        self.repository.confirm_attempt_start(collecting["attempt_id"], WORKER, now=BASE_TIME)
+        self.repository.begin_collection(collecting["attempt_id"], WORKER, now=BASE_TIME)
+        failed_collecting = self.repository.fail_attempt(
+            collecting["attempt_id"], WORKER, "collection_failed", now=BASE_TIME
+        )
+        self.assertEqual(self.repository.get_attempt(collecting["attempt_id"])["termination_state"], "requested")
+        self.assertEqual(failed_collecting["status"], "failed")
+
+    def test_termination_requested_for_reconciling_loss_from_operator_and_wall_budget(self) -> None:
+        operator = self._reconciling_attempt(now=BASE_TIME)
+        self.repository.force_lost_attempt(operator["attempt_id"], "operator loss", now=BASE_TIME + timedelta(seconds=1))
+        self.assertEqual(self.repository.get_attempt(operator["attempt_id"])["termination_state"], "requested")
+
+        wall = self._reconciling_attempt(now=BASE_TIME)
+        released = EvaluationMiddleware(self.repository).auto_release_wall_budget(
+            now=BASE_TIME + timedelta(seconds=2101)
+        )
+        self.assertEqual(released[0]["status"], "released")
+        self.assertEqual(self.repository.get_attempt(wall["attempt_id"])["status"], "lost")
+        self.assertEqual(self.repository.get_attempt(wall["attempt_id"])["termination_state"], "requested")
+
+    def test_termination_state_stays_null_for_unstarted_loss_and_normal_completion(self) -> None:
+        leased = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE attempts SET status='leased' WHERE attempt_id=?",
+                (leased["attempt_id"],),
+            )
+            connection.commit()
+        self.assertEqual(self.repository.expire_leases(now=BASE_TIME + timedelta(seconds=301)), [leased["attempt_id"]])
+        self.assertEqual(self.repository.get_attempt(leased["attempt_id"])["status"], "lost")
+        self.assertIsNone(self.repository.get_attempt(leased["attempt_id"])["termination_state"])
+
+        completed = self.lease(self.prepare(self.submit(), window_limit=2), now=BASE_TIME)
+        self.repository.confirm_attempt_start(completed["attempt_id"], WORKER, now=BASE_TIME)
+        self.repository.begin_collection(completed["attempt_id"], WORKER, now=BASE_TIME)
+        self.repository.complete_attempt(
+            completed["attempt_id"], WORKER, ["evidence.completed"],
+            now=BASE_TIME, _validated_session_result=True,
+        )
+        self.assertEqual(self.repository.get_attempt(completed["attempt_id"])["status"], "completed")
+        self.assertIsNone(self.repository.get_attempt(completed["attempt_id"])["termination_state"])
+
+    def test_lease_expiry_to_reconciling_keeps_termination_state_null(self) -> None:
+        for status in ("starting", "running", "collecting"):
+            attempt = self.lease(self.prepare(self.submit(), window_limit=4), now=BASE_TIME)
+            if status in {"running", "collecting"}:
+                self.repository.confirm_attempt_start(attempt["attempt_id"], WORKER, now=BASE_TIME)
+            if status == "collecting":
+                self.repository.begin_collection(attempt["attempt_id"], WORKER, now=BASE_TIME)
+            self.assertEqual(self.repository.expire_leases(now=BASE_TIME + timedelta(seconds=301)), [attempt["attempt_id"]])
+            stored = self.repository.get_attempt(attempt["attempt_id"])
+            self.assertEqual(stored["status"], "reconciling")
+            self.assertIsNone(stored["termination_state"])
+
+    def test_v12_to_v13_migration_adds_termination_state_and_is_idempotent(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DELETE FROM schema_migrations WHERE version = 13")
+            connection.commit()
+        SQLiteEvaluationRepository(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(attempts)")}
+            versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+        self.assertIn("termination_state", columns)
+        self.assertIn(13, versions)
+
+        before_sql, before_rootpage = self._sqlite_index()
+        SQLiteEvaluationRepository(self.database)
+        after_sql, after_rootpage = self._sqlite_index()
+        self.assertEqual(before_sql, after_sql)
+        self.assertEqual(before_rootpage, after_rootpage)
+
+    def test_termination_state_and_source_state_enum_invariants(self) -> None:
+        self.assertEqual(ATTEMPT_TERMINATION_STATES, frozenset({"requested", "confirmed", "unavailable"}))
+        # absent/unknown/indeterminate/unreachable have distinct observation/start-outcome meanings.
+        for state in ("absent", "unknown", "indeterminate", "unreachable"):
+            self.assertNotIn(state, ATTEMPT_TERMINATION_STATES)
+        self.assertEqual(
+            TERMINATION_REQUEST_SOURCE_STATES,
+            frozenset({"starting", "running", "collecting", "reconciling"}),
+        )
+        for state in ("leased", "planned", "completed", "failed", "lost", "cancelled"):
+            self.assertNotIn(state, TERMINATION_REQUEST_SOURCE_STATES)
+        outputs = [attempt_termination_states_sql(ATTEMPT_TERMINATION_STATES) for _ in range(3)]
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(outputs[1], outputs[2])
 
 if __name__ == "__main__":
     unittest.main()
