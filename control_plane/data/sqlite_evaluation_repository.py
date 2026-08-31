@@ -20,6 +20,7 @@ from control_plane.core.evaluation_contracts import (
     TERMINATION_REQUEST_SOURCE_STATES,
     ContractError,
     attempt_states_sql,
+    canonical_json,
     make_attempt,
     normalize_token,
     validate_algorithm_event,
@@ -51,10 +52,11 @@ from control_plane.evaluation.compute_profile import (
 from control_plane.evaluation.execution_planning import materialize_session_plan
 from control_plane.evaluation.automation_policy import DEFAULT_AUTOMATION_POLICY, most_conservative
 from control_plane.evaluation.scheduling import SchedulingError, validate_resource_allocation
+from control_plane.simulation.session_contracts import validate_simulation_session_plan
+
 _ACTIVE_ATTEMPT_STATES_SQL = attempt_states_sql(ACTIVE_ATTEMPT_STATES)
 _CAPACITY_HOLDING_ATTEMPT_STATES_SQL = attempt_states_sql(CAPACITY_HOLDING_ATTEMPT_STATES)
 _HEARTBEATABLE_ATTEMPT_STATES_SQL = attempt_states_sql(HEARTBEATABLE_ATTEMPT_STATES)
-from control_plane.simulation.session_contracts import validate_simulation_session_plan
 
 
 SCHEMA_VERSION = 13
