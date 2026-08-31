@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ from control_plane.evaluation.execution_options import (
     make_performance_profile_snapshot,
 )
 from control_plane.evaluation.execution_planning import materialize_session_plan
+from control_plane.evaluation.dispatcher import SessionLifecycleDispatcher
 from control_plane.evaluation.service import EvaluationMiddleware
 from control_plane.evaluation.scheduling import make_resource_allocation, schedule
 
@@ -986,6 +988,148 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             else BASE_TIME - timedelta(seconds=1),
         )
 
+    def _txn_counter(self):
+        calls = []
+        original = self.repository._transaction
+
+        def counted(*args, **kwargs):
+            calls.append(True)
+            return original(*args, **kwargs)
+
+        return calls, counted
+
+    def test_recovery_probes_do_not_open_write_transactions_when_idle(self) -> None:
+        middleware = EvaluationMiddleware(self.repository)
+        worker = mock.Mock()
+        dispatcher = SessionLifecycleDispatcher(
+            middleware, mock.Mock(), worker,
+            dispatcher_id="dispatcher:probe", lease_seconds=30,
+        )
+        calls, counted = self._txn_counter()
+        with mock.patch.object(self.repository, "_transaction", counted):
+            self.assertIsNone(dispatcher.recover_once(now=BASE_TIME))
+        self.assertEqual(len(calls), 0)
+
+    def test_each_idle_recovery_step_skips_write_transaction(self) -> None:
+        middleware = EvaluationMiddleware(self.repository)
+        cases = [
+            lambda: middleware.expire_leases(now=BASE_TIME),
+            lambda: middleware.auto_release_wall_budget(now=BASE_TIME),
+            lambda: middleware.auto_requeue_recovering(now=BASE_TIME),
+            lambda: middleware.lease_next_reconciliation("observer:idle", 30, now=BASE_TIME),
+        ]
+        for operation in cases:
+            calls, counted = self._txn_counter()
+            with mock.patch.object(self.repository, "_transaction", counted):
+                self.assertIn(operation(), ([], None))
+            self.assertEqual(len(calls), 0)
+
+    def test_expired_leased_attempt_becomes_lost(self) -> None:
+        attempt = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE attempts SET status='leased' WHERE attempt_id=?",
+                (attempt["attempt_id"],),
+            )
+            connection.commit()
+        later = BASE_TIME + timedelta(seconds=301)
+        expired = self.repository.expire_leases(now=later)
+        stored = self.repository.get_attempt(attempt["attempt_id"])
+        self.assertEqual(stored["status"], "lost")
+        self.assertEqual(stored["failure_class"], "worker-lease-expired-before-start")
+        self.assertTrue(any(e["event_type"] == "AttemptLost" for e in self.repository.state_events(attempt["attempt_id"])))
+
+    def test_expired_running_attempt_becomes_reconciling(self) -> None:
+        attempt = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+        self.repository.confirm_attempt_start(attempt["attempt_id"], WORKER, now=BASE_TIME)
+        later = BASE_TIME + timedelta(seconds=301)
+        self.assertEqual(self.repository.expire_leases(now=later), [attempt["attempt_id"]])
+        stored = self.repository.get_attempt(attempt["attempt_id"])
+        self.assertEqual(stored["status"], "reconciling")
+        self.assertIsNone(stored["lease_owner"])
+        self.assertTrue(any(e["event_type"] == "AttemptReconciliationRequired" for e in self.repository.state_events(attempt["attempt_id"])))
+
+    def test_recovery_steps_process_real_work(self) -> None:
+        wall = self._reconciling_attempt(now=BASE_TIME)
+        middleware = EvaluationMiddleware(self.repository)
+        released = middleware.auto_release_wall_budget(
+            now=BASE_TIME + timedelta(seconds=2101)
+        )
+        self.assertEqual(released[0]["status"], "released")
+        self.assertEqual(self.repository.get_attempt(wall["attempt_id"])["status"], "lost")
+        self.assertTrue(
+            any(
+                event["event_type"] == "AttemptLost"
+                and event["payload"].get("source") == "auto:wall-proof"
+                for event in self.repository.state_events(wall["attempt_id"])
+            )
+        )
+
+        recovering = self._timeout_attempt()
+        triage = middleware.auto_requeue_recovering(now=BASE_TIME)
+        matching = [
+            item for item in triage
+            if item.get("evaluation_id") == recovering["evaluation_id"]
+        ]
+        self.assertTrue(matching)
+        self.assertEqual(matching[0]["action"], "requeued")
+        self.assertEqual(
+            self.repository.get_evaluation(recovering["evaluation_id"])["status"],
+            "queued",
+        )
+        self.assertTrue(
+            any(
+                event["event_type"] == "RecoveryPlanned"
+                and event["payload"].get("source") == "auto:requeue"
+                for event in self.repository.state_events(recovering["evaluation_id"])
+            )
+        )
+        candidate = self._reconciling_attempt(now=BASE_TIME + timedelta(seconds=1))
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE attempts SET lease_owner=NULL, lease_expires_at=NULL WHERE attempt_id=?",
+                (candidate["attempt_id"],),
+            )
+            connection.commit()
+        leased = middleware.lease_next_reconciliation("observer:work", 30, now=BASE_TIME)
+        self.assertEqual(leased["attempt_id"], candidate["attempt_id"])
+        self.assertEqual(leased["lease_owner"], "observer:work")
+        self.assertTrue(
+            any(
+                event["event_type"] == "AttemptReconciliationLeased"
+                for event in self.repository.state_events(candidate["attempt_id"])
+            )
+        )
+    def test_recovery_tolerates_candidate_stolen_after_probe(self) -> None:
+        middleware = EvaluationMiddleware(self.repository)
+        worker = mock.Mock()
+        dispatcher = SessionLifecycleDispatcher(
+            middleware, mock.Mock(), worker,
+            dispatcher_id="dispatcher:race", lease_seconds=30,
+        )
+        with mock.patch.object(middleware, "has_reconciliation_candidate", return_value=True), \
+             mock.patch.object(middleware, "lease_next_reconciliation", return_value=None):
+            self.assertIsNone(dispatcher.recover_once(now=BASE_TIME))
+
+    def test_recovery_falls_back_for_middleware_without_probe_methods(self) -> None:
+        repository = self.repository
+
+        class LegacyMiddleware:
+            def expire_leases(self, **kwargs):
+                return repository.expire_leases(**kwargs)
+            def auto_release_wall_budget(self, **kwargs):
+                return repository.auto_release_wall_budget({}, **kwargs)
+            def auto_requeue_recovering(self, **kwargs):
+                return repository.auto_requeue_recovering(**kwargs)
+            def lease_next_reconciliation(self, *args, **kwargs):
+                return repository.lease_next_reconciliation(*args, **kwargs)
+
+        legacy = LegacyMiddleware()
+        dispatcher = SessionLifecycleDispatcher(
+            legacy, mock.Mock(), mock.Mock(),
+            dispatcher_id="dispatcher:legacy", lease_seconds=30,
+        )
+        self.assertIsNone(dispatcher.recover_once(now=BASE_TIME))
 
 if __name__ == "__main__":
     unittest.main()
