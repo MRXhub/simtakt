@@ -57,7 +57,7 @@ _HEARTBEATABLE_ATTEMPT_STATES_SQL = attempt_states_sql(HEARTBEATABLE_ATTEMPT_STA
 from control_plane.simulation.session_contracts import validate_simulation_session_plan
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 _SHA256_REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -225,6 +225,7 @@ class SQLiteEvaluationRepository:
                     lease_owner TEXT,
                     lease_expires_at TEXT,
                     session_ref TEXT,
+                    last_heartbeat_at TEXT,
                     execution_preparation_id TEXT,
                     execution_preparation_json TEXT,
                     selected_execution_option_id TEXT,
@@ -407,6 +408,10 @@ class SQLiteEvaluationRepository:
                     if "feedback_recorded_at" not in columns:
                         connection.execute(
                             "ALTER TABLE attempts ADD COLUMN feedback_recorded_at TEXT"
+                        )
+                    if "last_heartbeat_at" not in columns:
+                        connection.execute(
+                            "ALTER TABLE attempts ADD COLUMN last_heartbeat_at TEXT"
                         )
                     connection.execute(
                         """CREATE TABLE IF NOT EXISTS attempt_feedback (
@@ -2967,7 +2972,7 @@ class SQLiteEvaluationRepository:
                 """
                 UPDATE attempts
                 SET lease_owner = ?, lease_expires_at = ?, session_ref = ?,
-                    allocation_json = ?, updated_at = ?
+                    allocation_json = ?, last_heartbeat_at = ?, updated_at = ?
                 WHERE attempt_id = ? AND status = 'planned'
                   AND allocation_json IS NULL
                 """,
@@ -2976,6 +2981,7 @@ class SQLiteEvaluationRepository:
                     _iso(expires),
                     normalized["session_ref"],
                     canonical_json(normalized),
+                    timestamp,
                     timestamp,
                     attempt_id,
                 ),
@@ -3156,7 +3162,7 @@ class SQLiteEvaluationRepository:
                 SET selected_execution_option_id = ?,
                     execution_plan_id = ?, execution_plan_json = ?,
                     lease_owner = ?, lease_expires_at = ?, session_ref = ?,
-                    allocation_json = ?, updated_at = ?
+                    allocation_json = ?, last_heartbeat_at = ?, updated_at = ?
                 WHERE attempt_id = ? AND status = 'planned'
                   AND execution_preparation_id = ?
                   AND selected_execution_option_id IS NULL
@@ -3171,6 +3177,7 @@ class SQLiteEvaluationRepository:
                     _iso(expires),
                     normalized_allocation["session_ref"],
                     canonical_json(normalized_allocation),
+                    timestamp,
                     timestamp,
                     attempt_id,
                     preparation_identity,
@@ -3269,10 +3276,10 @@ class SQLiteEvaluationRepository:
             connection.execute(
                 """
                 UPDATE attempts
-                SET lease_owner = ?, lease_expires_at = ?, updated_at = ?
+                SET lease_owner = ?, lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ?
                 WHERE attempt_id = ? AND status = 'planned'
                 """,
-                (worker, _iso(expires), timestamp, attempt_id),
+                (worker, _iso(expires), timestamp, timestamp, attempt_id),
             )
             self._transition_attempt(
                 connection,
@@ -3468,9 +3475,9 @@ class SQLiteEvaluationRepository:
                 raise RepositoryError("terminal Attempt cannot renew a lease")
             connection.execute(
                 """
-                UPDATE attempts SET lease_expires_at = ?, updated_at = ? WHERE attempt_id = ?
+                UPDATE attempts SET lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ? WHERE attempt_id = ?
                 """,
-                (_iso(current + timedelta(seconds=lease_seconds)), _iso(current), attempt_id),
+                (_iso(current + timedelta(seconds=lease_seconds)), _iso(current), _iso(current), attempt_id),
             )
             return self.get_attempt(attempt_id, connection=connection)
 
@@ -4483,6 +4490,7 @@ class SQLiteEvaluationRepository:
             "lease_owner": row["lease_owner"],
             "lease_expires_at": row["lease_expires_at"],
             "session_ref": row["session_ref"],
+            "last_heartbeat_at": row["last_heartbeat_at"],
             "execution_preparation_id": row["execution_preparation_id"],
             "execution_preparation": (
                 None

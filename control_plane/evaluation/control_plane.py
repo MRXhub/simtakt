@@ -6,6 +6,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+from control_plane.core.evaluation_contracts import ACTIVE_ATTEMPT_STATES
+
 
 CONTROL_PLANE_DATABASE_RELATIVE_PATH = Path(
     "data/outputs/evaluation-middleware/control.sqlite3"
@@ -47,13 +49,7 @@ def legacy_control_plane_activity(
     root = Path(project_root).expanduser().resolve()
     global_database = resolve_control_plane_database(root)
     control_root = global_database.parent
-    active_statuses = (
-        "planned",
-        "leased",
-        "running",
-        "collecting",
-        "reconciling",
-    )
+    active_statuses = tuple(sorted(ACTIVE_ATTEMPT_STATES))
     activity: list[dict[str, Any]] = []
     for database in sorted(control_root.rglob("control.sqlite3")):
         resolved = database.resolve()
