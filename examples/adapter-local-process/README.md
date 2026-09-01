@@ -27,7 +27,9 @@ On Windows, do not use `os.kill(pid, 0)` to probe liveness: the Windows
 implementation routes that call through `TerminateProcess`, so it kills rather
 than probes. This can create a false pass: the probe itself kills the process,
 then a “process disappeared” assertion appears to prove that termination worked.
-Use `tasklist` for a non-destructive probe instead.
+Use `tasklist` for a non-destructive probe instead. Both probe and termination
+commands must enforce timeouts: `observe_session` is called on every poll cycle,
+and a single unbounded probe or termination call can block the entire scheduling loop indefinitely.
 
 Deterministic numerical failure is expressed as `observe_session == "completed"`
 followed by an `exhausted` result with a `terminal_cause` (here,
@@ -52,5 +54,3 @@ Expected key output includes `normal observe=completed`, `diverge observe=comple
 and an exhausted result, and `tree terminate=terminated ... child_alive=False`
 (the latter is direct PID liveness verification, not inference from `taskkill`'s
 return code).
-
-

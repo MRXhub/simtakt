@@ -27,18 +27,26 @@ from run_demo import plan
 sys.modules.pop("run_demo", None)
 sys.path.remove(str(EXAMPLE))
 from control_plane.simulation.session_contracts import validate_simulation_session_result
-VALID_STATES = {"running", "completed", "failed", "unreachable", "indeterminate"}
+from control_plane.simulation.worker import SESSION_OBSERVATIONS
+
+VALID_STATES = SESSION_OBSERVATIONS
 
 
-def process_alive(pid: int) -> bool:
+def process_alive(pid: int) -> bool | None:
     """Probe process existence without the destructive Windows os.kill(pid, 0)."""
     if os.name == "nt":
-        completed = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if completed.returncode != 0:
+            return None
         output = (completed.stdout or b"").decode("mbcs", errors="replace")
         for row in csv.reader(output.splitlines()):
             if len(row) >= 2 and row[1].strip() == str(pid):
@@ -46,7 +54,11 @@ def process_alive(pid: int) -> bool:
         return False
     try:
         os.kill(pid, 0)
-    except (OSError, ProcessLookupError):
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return None
+    except OSError:
         return False
     return True
 
@@ -70,9 +82,12 @@ class AdapterLocalProcessExampleTests(unittest.TestCase):
                 pid = json.loads(pid_file.read_text(encoding="utf-8")).get("pid")
             except (OSError, ValueError, UnicodeDecodeError):
                 pid = None
-            if pid and process_alive(int(pid)) and os.name == "nt":
-                subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, check=False)
-            elif pid and process_alive(int(pid)):
+            if pid and process_alive(int(pid)) is True and os.name == "nt":
+                try:
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True, check=False, timeout=15)
+                except subprocess.TimeoutExpired:
+                    pass
+            elif pid and process_alive(int(pid)) is True:
                 try:
                     os.kill(int(pid), 9)
                 except OSError:
@@ -118,7 +133,7 @@ class AdapterLocalProcessExampleTests(unittest.TestCase):
         identity["token"] = "not-the-launch-token"
         pid_file.write_text(json.dumps(identity), encoding="utf-8")
         self.assertNotEqual(self.worker.terminate_session(ref), "terminated")
-        self.assertTrue(process_alive(int(identity["pid"])))
+        self.assertIs(process_alive(int(identity["pid"])), True)
 
     def test_observe_probe_has_no_side_effect(self):
         ref = self.start("hang")
@@ -126,17 +141,17 @@ class AdapterLocalProcessExampleTests(unittest.TestCase):
         self.wait_for(lambda: self.worker.observe_session(ref) == "running")
         for _ in range(5):
             self.assertEqual(self.worker.observe_session(ref), "running")
-        self.assertTrue(process_alive(pid))
+        self.assertIs(process_alive(pid), True)
 
     def test_terminate_kills_parent_and_child_process_tree(self):
         ref = self.start("tree")
         child_pid = int(self.wait_for(lambda: (self.root / "solver.child.pid").read_text(encoding="ascii") if (self.root / "solver.child.pid").exists() else None))
         parent_pid = self.worker._procs[ref].pid
-        self.assertTrue(process_alive(parent_pid))
-        self.assertTrue(process_alive(child_pid))
+        self.assertIs(process_alive(parent_pid), True)
+        self.assertIs(process_alive(child_pid), True)
         self.assertEqual(self.worker.terminate_session(ref), "terminated")
-        self.assertFalse(process_alive(parent_pid))
-        self.assertFalse(process_alive(child_pid))
+        self.assertIs(process_alive(parent_pid), False)
+        self.assertIs(process_alive(child_pid), False)
 
     def test_pid_token_mismatch_is_not_treated_as_owned_process(self):
         ref = self.start("hang")
@@ -147,7 +162,7 @@ class AdapterLocalProcessExampleTests(unittest.TestCase):
         pid_file.write_text(json.dumps(identity), encoding="utf-8")
         # A mismatched identity must not make an unrelated/live process appear owned.
         self.assertNotEqual(self.worker.observe_session(ref), "running")
-        self.assertTrue(process_alive(int(identity["pid"])))
+        self.assertIs(process_alive(int(identity["pid"])), True)
 
     def test_resume_is_idempotent_and_does_not_spawn_second_process(self):
         ref = self.start("hang")
@@ -157,7 +172,7 @@ class AdapterLocalProcessExampleTests(unittest.TestCase):
         for _ in range(3):
             self.worker.resume_session(plan(), {"workspace_root": str(self.root), "mode": "hang"}, ref)
         self.assertEqual(self.worker._procs[ref].pid, original_pid)
-        self.assertTrue(process_alive(original_pid))
+        self.assertIs(process_alive(original_pid), True)
 
     def test_non_utf8_log_does_not_crash_observe(self):
         ref = self.start("nonutf8")
@@ -169,7 +184,7 @@ class AdapterLocalProcessExampleTests(unittest.TestCase):
         self.wait_for(lambda: "running" if self.worker.observe_session(ref) == "running" else None)
         pid = self.worker._procs[ref].pid
         self.assertEqual(self.worker.terminate_session(ref), "terminated")
-        self.assertFalse(process_alive(pid))
+        self.assertIs(process_alive(pid), False)
 
 
 if __name__ == "__main__":

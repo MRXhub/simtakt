@@ -31,8 +31,9 @@ class SimulationWorker:
                 completed = subprocess.run(
                     ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                    timeout=15,
                 )
-            except OSError:
+            except (OSError, subprocess.TimeoutExpired):
                 return None
             if completed.returncode != 0:
                 return None
@@ -119,7 +120,17 @@ class SimulationWorker:
             initial_alive = self._alive(pid)
             if initial_alive is None: return "indeterminate"
             if not initial_alive: return "terminated"
-            if os.name == "nt": subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            if os.name == "nt":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/T", "/F", "/PID", str(pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=15,
+                    )
+                except subprocess.TimeoutExpired:
+                    return "indeterminate"
             else:
                 os.killpg(pid, signal.SIGTERM)
                 deadline = time.monotonic() + 2
