@@ -885,6 +885,33 @@ class EvaluationMiddleware:
             attempt_id, now=now, **observation
         )
 
+    def record_attempt_auto_feedback(self, attempt_id: str) -> None:
+        """Best-effort, idempotent feedback for one terminal Attempt.
+
+        Builds the feedback observation from durable timestamps
+        (``updated_at`` - ``created_at``) and folds it into the task-class
+        shape statistics.  Success is derived from the terminal status
+        (``completed`` succeeds; ``failed``/``lost`` do not).  Idempotent via
+        the ``attempt_feedback`` primary key and the Attempt's
+        ``feedback_json`` marker, and any failure is swallowed because
+        statistics are an accessory to — never a fact of — task termination.
+        """
+        attempt = self._repository.get_attempt(attempt_id)
+        status = str(attempt["status"])
+        if status == "completed":
+            success = True
+        elif status in {"failed", "lost"}:
+            success = False
+        else:
+            raise ContractError(
+                "Attempt feedback requires a terminal Attempt"
+            )
+        self._repository._record_auto_feedback(
+            attempt_id,
+            success=success,
+            terminal_time=attempt["updated_at"],
+        )
+
     def capacity_profile_snapshot(
         self, relevant_identities: Sequence[Mapping[str, Any]] = ()
     ) -> dict[str, Any]:

@@ -206,6 +206,12 @@ class SessionLifecycleDispatcher:
     ) -> dict[str, Any]:
         attempt = self.middleware.get_attempt(attempt_id)
         if attempt["status"] in {"completed", "failed", "lost"}:
+            # Re-entry of the termination path: best-effort, idempotent write of
+            # the task-class feedback observation so statistics are fed exactly
+            # once per terminal Attempt.
+            record = getattr(self.middleware, "record_attempt_auto_feedback", None)
+            if callable(record):
+                record(attempt_id)
             return attempt
         if attempt["execution_plan"] is None or attempt["session_ref"] is None:
             raise DispatchError("Attempt is not bound to a simulation session")

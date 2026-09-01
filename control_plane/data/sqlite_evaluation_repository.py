@@ -41,7 +41,9 @@ from control_plane.evaluation.compute_profile import (
     MAX_PROFILE_BUCKETS,
     MAX_RECENT_FEEDBACK_PER_BUCKET,
     MAX_SNAPSHOT_IDENTITIES,
+    TaskShapeStats,
     make_capacity_profile_snapshot,
+    make_feedback_observation,
     make_shape_record,
     make_task_class,
     validate_feedback_observation,
@@ -3751,7 +3753,10 @@ class SQLiteEvaluationRepository:
                 self._record_attempt_feedback_in_transaction(
                     connection, attempt_id, row, feedback, timestamp
                 )
-            return self.get_attempt(attempt_id, connection=connection)
+            result = self.get_attempt(attempt_id, connection=connection)
+        if feedback is None:
+            self._record_auto_feedback(attempt_id, success=True, terminal_time=timestamp)
+        return result
 
     @staticmethod
     def _feedback_preparation(row: sqlite3.Row) -> dict[str, Any]:
@@ -3811,40 +3816,54 @@ class SQLiteEvaluationRepository:
             "SELECT * FROM task_shape_stats WHERE task_class_key=? AND target_id=? AND profile_revision=? AND processors=?",
             bucket,
         ).fetchone()
-        values = {
-            "sample_count": 0 if row is None else int(row["sample_count"]),
-            "success_count": 0 if row is None else int(row["success_count"]),
-            "failure_count": 0 if row is None else int(row["failure_count"]),
-        }
-        values["sample_count"] += 1
-        values["success_count"] += int(observation["success"])
-        values["failure_count"] += int(not observation["success"])
-        metrics = (("wall", "wall_seconds", observation["success"]), ("cpu", "cpu_seconds", True), ("busy", "busy_seconds", True), ("rss", "rss_bytes", True))
-        for prefix, source, eligible in metrics:
-            count_key = prefix + "_samples"
-            mean_key = prefix + "_mean_seconds" if prefix != "rss" else "rss_mean_bytes"
-            m2_key = prefix + "_m2_seconds" if prefix != "rss" else "rss_m2_bytes"
-            count = 0 if row is None else int(row[count_key])
-            mean = None if row is None else row[mean_key]
-            m2 = None if row is None else row[m2_key]
-            value = observation[source]
-            if eligible and value is not None:
-                mean, m2 = welford_update(mean, m2, count, float(value))
-                count += 1
-            values.update({count_key: count, mean_key: mean, m2_key: m2})
+        # Reconstruct the per-shape online accumulator from the persisted row
+        # (or a fresh bucket) and fold in the new observation through the single
+        # Welford implementation owned by the contract layer.  Read-modify-write
+        # happens inside the caller's BEGIN IMMEDIATE transaction so concurrent
+        # daemons can never lose an update or compute a wrong variance.
+        stats = TaskShapeStats(
+            task_class_key=task_class, target_id=target,
+            profile_revision=revision, processors=processors,
+        )
+        if row is not None:
+            stats.sample_count = int(row["sample_count"])
+            stats.success_count = int(row["success_count"])
+            stats.failure_count = int(row["failure_count"])
+            stats.wall_samples = int(row["wall_samples"])
+            stats.wall_mean = row["wall_mean_seconds"]
+            stats.wall_m2 = row["wall_m2_seconds"]
+            stats.cpu_samples = int(row["cpu_samples"])
+            stats.cpu_mean = row["cpu_mean_seconds"]
+            stats.cpu_m2 = row["cpu_m2_seconds"]
+            stats.busy_samples = int(row["busy_samples"])
+            stats.busy_mean = row["busy_mean_seconds"]
+            stats.busy_m2 = row["busy_m2_seconds"]
+            stats.rss_samples = int(row["rss_samples"])
+            stats.rss_mean = row["rss_mean_bytes"]
+            stats.rss_m2 = row["rss_m2_bytes"]
+        stats.observe(observation)
+        values = (
+            task_class, target, revision, processors,
+            stats.sample_count, stats.success_count, stats.failure_count,
+            stats.wall_samples, stats.wall_mean, stats.wall_m2,
+            stats.cpu_samples, stats.cpu_mean, stats.cpu_m2,
+            stats.busy_samples, stats.busy_mean, stats.busy_m2,
+            stats.rss_samples, stats.rss_mean, stats.rss_m2, timestamp,
+        )
         if row is None:
             connection.execute(
                 "INSERT INTO task_shape_stats(task_class_key,target_id,profile_revision,processors,sample_count,success_count,failure_count,wall_samples,wall_mean_seconds,wall_m2_seconds,cpu_samples,cpu_mean_seconds,cpu_m2_seconds,busy_samples,busy_mean_seconds,busy_m2_seconds,rss_samples,rss_mean_bytes,rss_m2_bytes,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (task_class,target,revision,processors,values["sample_count"],values["success_count"],values["failure_count"],values["wall_samples"],values["wall_mean_seconds"],values["wall_m2_seconds"],values["cpu_samples"],values["cpu_mean_seconds"],values["cpu_m2_seconds"],values["busy_samples"],values["busy_mean_seconds"],values["busy_m2_seconds"],values["rss_samples"],values["rss_mean_bytes"],values["rss_m2_bytes"],timestamp),
+                values,
             )
         else:
             connection.execute(
                 "UPDATE task_shape_stats SET sample_count=?,success_count=?,failure_count=?,wall_samples=?,wall_mean_seconds=?,wall_m2_seconds=?,cpu_samples=?,cpu_mean_seconds=?,cpu_m2_seconds=?,busy_samples=?,busy_mean_seconds=?,busy_m2_seconds=?,rss_samples=?,rss_mean_bytes=?,rss_m2_bytes=?,updated_at=? WHERE task_class_key=? AND target_id=? AND profile_revision=? AND processors=?",
-                (values["sample_count"],values["success_count"],values["failure_count"],values["wall_samples"],values["wall_mean_seconds"],values["wall_m2_seconds"],values["cpu_samples"],values["cpu_mean_seconds"],values["cpu_m2_seconds"],values["busy_samples"],values["busy_mean_seconds"],values["busy_m2_seconds"],values["rss_samples"],values["rss_mean_bytes"],values["rss_m2_bytes"],timestamp,*bucket),
+                (*values[4:19], values[19], *bucket),
             )
 
+    @classmethod
     def _record_attempt_feedback_in_transaction(
-        self, connection: sqlite3.Connection, attempt_id: str, row: sqlite3.Row,
+        cls, connection: sqlite3.Connection, attempt_id: str, row: sqlite3.Row,
         observation: Mapping[str, Any], timestamp: str,
     ) -> dict[str, Any]:
         feedback = validate_feedback_observation(observation)
@@ -3859,11 +3878,11 @@ class SQLiteEvaluationRepository:
             return {"attempt_id": attempt_id, **stored, "created_at": row["feedback_recorded_at"]}
         existing = connection.execute("SELECT * FROM attempt_feedback WHERE attempt_id=?", (attempt_id,)).fetchone()
         if existing is not None:
-            stored = self._feedback_record(existing)
+            stored = cls._feedback_record(existing)
             if {key: stored[key] for key in feedback} != dict(feedback):
                 raise RepositoryError("conflicting Attempt feedback already exists")
             return stored
-        preparation = self._feedback_preparation(row)
+        preparation = cls._feedback_preparation(row)
         selected = next(item for item in preparation["execution_option_set"]["options"] if item["option_id"] == row["selected_execution_option_id"])
         definition = selected["simulation_definition"]
         task_class = make_task_class(simulation_definition_artifact_id=definition["artifact_id"], simulation_definition_revision=definition["revision"], numerical_profile=preparation["numerical_profile"], recovery_profile_revision=preparation["recovery_profile_revision"])["key"]
@@ -3876,12 +3895,12 @@ class SQLiteEvaluationRepository:
             connection.execute("DELETE FROM attempt_feedback WHERE task_class_key=? AND target_id=? AND profile_revision=? AND processors=?", old_bucket)
         connection.execute("INSERT INTO attempt_feedback(attempt_id,task_class_key,target_id,profile_revision,processors,succeeded,wall_seconds,cpu_seconds,busy_seconds,rss_bytes,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (attempt_id,*bucket,int(feedback["success"]),feedback["wall_seconds"],feedback["cpu_seconds"],feedback["busy_seconds"],feedback["rss_bytes"],timestamp))
         connection.execute("UPDATE attempts SET feedback_json=?,feedback_recorded_at=? WHERE attempt_id=?", (canonical_json(feedback),timestamp,attempt_id))
-        self._feedback_update_stats(connection,bucket,feedback,timestamp)
+        cls._feedback_update_stats(connection,bucket,feedback,timestamp)
         connection.execute("DELETE FROM attempt_feedback WHERE attempt_id IN (SELECT attempt_id FROM attempt_feedback WHERE task_class_key=? AND target_id=? AND profile_revision=? AND processors=? ORDER BY created_at DESC,attempt_id DESC LIMIT -1 OFFSET ?)", (*bucket,MAX_RECENT_FEEDBACK_PER_BUCKET))
         stored = connection.execute("SELECT * FROM attempt_feedback WHERE attempt_id=?", (attempt_id,)).fetchone()
         if stored is None:
             raise RepositoryError("feedback ledger evicted its newest entry")
-        return self._feedback_record(stored)
+        return cls._feedback_record(stored)
 
     def record_attempt_feedback(
         self, attempt_id: str, *, success: bool, wall_seconds: float | None = None,
@@ -3898,6 +3917,58 @@ class SQLiteEvaluationRepository:
             if (row["status"] == "completed") != observation["success"]:
                 raise RepositoryError("Attempt feedback success does not match terminal status")
             return self._record_attempt_feedback_in_transaction(connection, attempt_id, row, observation, _iso(_utc_now() if now is None else now))
+
+    @staticmethod
+    def _attempt_wall_seconds(row: sqlite3.Row, terminal_time: str) -> float | None:
+        """Wall-clock seconds from an Attempt's created_at to its terminal time.
+
+        The Attempt table has no dedicated 'started_at'; ``created_at`` records
+        when the Attempt fact was born and the terminal ``updated_at`` records
+        when it reached a terminal state.  Their difference is the best durable
+        proxy for real wall-clock duration without changing the adapter
+        contract.  Returns None when the interval is missing, zero, or negative
+        (clock skew) so callers never feed a bogus positive wall time.
+        """
+        try:
+            start = datetime.fromisoformat(str(row["created_at"]))
+            end = datetime.fromisoformat(str(terminal_time))
+            seconds = (end - start).total_seconds()
+            if seconds <= 0 or not math.isfinite(seconds):
+                return None
+            return seconds
+        except (TypeError, ValueError):
+            return None
+
+    def _record_auto_feedback(
+        self, attempt_id: str, *, success: bool, terminal_time: str | None = None
+    ) -> None:
+        """Best-effort feedback write for one terminal Attempt.
+
+        Runs in its own BEGIN IMMEDIATE transaction so the stats
+        read-modify-write is atomic; idempotency is guaranteed by the
+        ``attempt_feedback`` primary key and the Attempt's ``feedback_json``
+        marker.  Any failure is swallowed because feedback is an accessory to,
+        never a fact of, task termination.
+        """
+        try:
+            timestamp = terminal_time or _iso(_utc_now())
+            with self._transaction() as connection:
+                row = connection.execute(
+                    "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
+                ).fetchone()
+                if row is None or row["feedback_json"] is not None:
+                    return
+                wall = self._attempt_wall_seconds(row, timestamp)
+                observation = make_feedback_observation(
+                    success=success, wall_seconds=wall
+                )
+                self._record_attempt_feedback_in_transaction(
+                    connection, attempt_id, row, observation, timestamp
+                )
+        except Exception:
+            # Feedback is an accessory to termination; never let it abort the
+            # task's own final state.
+            return
 
     def get_attempt_feedback(self, attempt_id: str) -> dict[str, Any] | None:
         with closing(self._connect()) as connection:
@@ -4034,6 +4105,19 @@ class SQLiteEvaluationRepository:
             publish=False,
             created_at=created_at,
         )
+        # Lost Attempts count as unsuccessful feedback.  Record within the same
+        # BEGIN IMMEDIATE transaction, but swallow any failure: feedback is an
+        # accessory to, never a fact of, the lost transition itself.  The
+        # attempt_feedback primary key and feedback_json marker keep this
+        # idempotent under re-entry.
+        try:
+            wall = cls._attempt_wall_seconds(row, created_at)
+            observation = make_feedback_observation(success=False, wall_seconds=wall)
+            cls._record_attempt_feedback_in_transaction(
+                connection, attempt_id, row, observation, created_at
+            )
+        except Exception:
+            return
 
     def force_lost_attempt(
         self,
@@ -4182,7 +4266,10 @@ class SQLiteEvaluationRepository:
                 self._record_attempt_feedback_in_transaction(
                     connection, attempt_id, row, feedback, timestamp
                 )
-            return self.get_attempt(attempt_id, connection=connection)
+            result = self.get_attempt(attempt_id, connection=connection)
+        if feedback is None:
+            self._record_auto_feedback(attempt_id, success=False, terminal_time=timestamp)
+        return result
 
     def mark_attempt_reconciling(
         self,

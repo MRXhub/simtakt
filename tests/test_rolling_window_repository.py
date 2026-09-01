@@ -682,7 +682,7 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             row = connection.execute("SELECT * FROM attempts WHERE attempt_id=?", (attempt["attempt_id"],)).fetchone()
             shape = self.repository._attempt_shape(row)
             assert shape is not None
-            connection.execute("INSERT INTO task_shape_stats(task_class_key,target_id,profile_revision,processors,sample_count,success_count,failure_count,wall_samples,wall_mean_seconds,wall_m2_seconds,cpu_samples,cpu_mean_seconds,cpu_m2_seconds,busy_samples,busy_mean_seconds,busy_m2_seconds,rss_samples,rss_mean_bytes,rss_m2_bytes,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*shape,20,20,0,20,100.0,0.0,0,None,None,0,None,None,0,None,None,"now"))
+            connection.execute("INSERT OR REPLACE INTO task_shape_stats(task_class_key,target_id,profile_revision,processors,sample_count,success_count,failure_count,wall_samples,wall_mean_seconds,wall_m2_seconds,cpu_samples,cpu_mean_seconds,cpu_m2_seconds,busy_samples,busy_mean_seconds,busy_m2_seconds,rss_samples,rss_mean_bytes,rss_m2_bytes,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (*shape,20,20,0,20,100.0,0.0,0,None,None,0,None,None,0,None,None,"now"))
             connection.commit()
         result = self.repository.auto_requeue_recovering(now=BASE_TIME)
         self.assertEqual(result[0]["tier"], 1)
