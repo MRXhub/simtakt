@@ -3,24 +3,14 @@
 This example is a worker skeleton for a submit-to-batch-queue execution model. It
 uses `FakeBatchQueue`; it never invokes a real scheduler command.
 
-## Documentation reliability tiers
-
-Reference materials in this example are classified into three reliability tiers:
-
-- **Tier A (Canonical / Primary public docs)**: Primary vendor or open-source documentation with public, official URLs (for example, official Slurm and IBM LSF reference manuals).
-- **Tier B (Vendor public references)**: Vendor-hosted public knowledgebase articles and reference pages accessible without license authentication (for example, COMSOL Knowledgebase and OpenFOAM User Guide).
-- **Tier C (Third-party mirrors / Academic archives / Legacy publications)**: Third-party PDF mirrors, university course pages, and historical vendor newsletters. Official manuals for proprietary TCAD suites (such as Synopsys Sentaurus and Silvaco ATLAS) require authenticated customer license portal access (such as Synopsys SolvNet or Silvaco customer portal) and lack publicly accessible canonical URLs.
-
-> **Notice**: This repository has not executed or verified these command lines against live licensed commercial simulation software. All command patterns, argument semantics, and thread precedence rules are synthesized from publicly accessible documentation, academic archives, and secondary mirrors.
-
 ## Processor injection (decide per solver)
 
 | Software | Where processors are injected | Why this adapter must decide |
 |---|---|---|
-| Silvaco DeckBuild / ATLAS (Tier C) | Deck/input statements (commonly `go`/tool input) | The solver's input language, not a generic scheduler flag, controls parallelism. |
-| COMSOL Multiphysics (Tier B) | COMSOL batch command-line options (or model/M-file settings) | A scheduler allocation and COMSOL's own process settings are separate layers. |
-| OpenFOAM (Tier B) | `system/decomposeParDict` (`numberOfSubdomains`) and MPI command line (`mpirun -np <N>`) | `numberOfSubdomains` in `decomposeParDict` must match `mpirun -np`; this cross-file/command-line coupling cannot be expressed by a pure JSON template. |
-| Synopsys Sentaurus Device / sdevice (Tier C) | Four injection points with precedence: `Math` block, CLI `--threads`, environment variables, and separate assembly/solver thread counts | Multiple injection points and strict override precedence (`--threads` overrides `Math` section, per-operation assembly/linear-solver counts override global counts) mean uncoordinated configurations can silently diverge from scheduler allocations. |
+| Silvaco DeckBuild / ATLAS | Deck/input statements (commonly `go`/tool input) | The solver's input language, not a generic scheduler flag, controls parallelism. |
+| COMSOL Multiphysics | COMSOL batch command-line options (or model/M-file settings) | A scheduler allocation and COMSOL's own process settings are separate layers. |
+| OpenFOAM | `system/decomposeParDict` (`numberOfSubdomains`) and MPI command line (`mpirun -np <N>`) | `numberOfSubdomains` in `decomposeParDict` must match `mpirun -np`; this cross-file/command-line coupling cannot be expressed by a pure JSON template. |
+| Synopsys Sentaurus Device / sdevice | Four injection points with precedence: `Math` block, CLI `--threads`, environment variables, and separate assembly/solver thread counts | Multiple injection points and strict override precedence (`--threads` overrides `Math` section, per-operation assembly/linear-solver counts override global counts) mean uncoordinated configurations can silently diverge from scheduler allocations. |
 
 `rewrite_deck_parameters` is the utility intended for the first, deck-rewrite
 category; it is not a substitute for a scheduler's processor request. Confirm
@@ -28,15 +18,19 @@ the exact syntax for your software/version before implementing submission.
 
 ## Real solver command lines and pitfalls
 
-1. **Silvaco DeckBuild / ATLAS (Tier C)**
+1. **Silvaco DeckBuild / ATLAS**
    - Command pattern:
      ```sh
-     deckbuild -run <input_deck> -outfile <output_log>
+     deckbuild -run -ascii -outfile <output_log> <input_deck>
      ```
-   - Pitfall: Using `-outfile` can drop logs or lose unbuffered output if the process terminates abruptly.
-   - Reference: Silvaco Official Documentation (https://silvaco.com/) and ATLAS manual secondary mirror (https://www.eng.buffalo.edu/~wie/silvaco/atlas_user_manual.pdf).
+     `-run` enables batch execution; `-ascii` keeps the GUI from opening.
+   - Pitfall: Omitting `-outfile` loses the run-time output — including warnings
+     and errors — once the batch process exits, and that log is exactly what a
+     convergence criterion needs to read.
+   - Reference: https://silvaco.com/ and the ATLAS manual mirror at
+     https://www.eng.buffalo.edu/~wie/silvaco/atlas_user_manual.pdf
 
-2. **COMSOL Multiphysics (Tier B)**
+2. **COMSOL Multiphysics**
    - Command pattern:
      ```sh
      comsol batch -inputfile <input.mph> -outputfile <output.mph> -nn <nn> -np <np>
@@ -44,15 +38,15 @@ the exact syntax for your software/version before implementing submission.
    - Pitfall: Omitting `-outputfile` directly overwrites the input file, creating data corruption risks. Furthermore, total allocated cores are roughly `nn * np` (`-nn` processes across nodes, `-np` cores per process); misconfiguring either factor results in CPU under-allocation or core oversubscription.
    - Reference: COMSOL Knowledgebase 1001 (https://www.comsol.com/support/knowledgebase/1001) and COMSOL Reference Documentation (https://doc.comsol.com/).
 
-3. **OpenFOAM (Tier B)**
+3. **OpenFOAM**
    - Command pattern:
      ```sh
      decomposePar && mpirun -np <N> <solver> -parallel | tee <log_file> && reconstructPar
      ```
    - Pitfall: Reaching `endTime` does not imply numerical convergence (a simulation can finish all time steps without meeting residual convergence criteria). Additionally, running `mpirun ... | tee ...` masks the solver's non-zero exit status in standard shell pipelines unless `set -o pipefail` or `$PIPESTATUS` is used.
-   - Reference: OpenFOAM User Guide (https://www.openfoam.com/documentation/user-guide/).
+   - Reference: https://doc.openfoam.com/2306/tools/parallel/
 
-4. **Synopsys Sentaurus Device / sdevice (Tier C)**
+4. **Synopsys Sentaurus Device / sdevice**
    - Command pattern:
      ```sh
      sdevice my_device.cmd > my_device.log 2>&1
@@ -99,17 +93,14 @@ Real command references (all are documentation, not calls made here):
 * Slurm `scancel`: https://slurm.schedmd.com/scancel.html
 * IBM LSF `bjobs`: https://www.ibm.com/docs/en/spectrum-lsf/latest?topic=reference-bjobs
 * IBM LSF `bkill`: https://www.ibm.com/docs/en/spectrum-lsf/latest?topic=reference-bkill
-* COMSOL Knowledgebase 1001 (Tier B, Running COMSOL in batch mode): https://www.comsol.com/support/knowledgebase/1001
-* COMSOL Reference Documentation (Tier B): https://doc.comsol.com/
-* Silvaco Official Documentation (Tier C portal): https://silvaco.com/
-* Silvaco ATLAS User Manual (Tier C, secondary mirror): https://www.eng.buffalo.edu/~wie/silvaco/atlas_user_manual.pdf
-* OpenFOAM User Guide (Tier B): https://www.openfoam.com/documentation/user-guide/
-* Sentaurus Device User Guide (Tier C, third-party mirror): https://kolegite.com/EE_library/collections/TCAD/Sentaurus/manuals/sdevice_ug.pdf
-* Stanford EE212 Sentaurus Workbench Introduction (Tier C, academic course archive): https://web.stanford.edu/class/ee212/
-* Synopsys TCAD Newsletter (Tier C, legacy vendor publication, 2011): https://www.synopsys.com/
+* COMSOL batch mode: https://www.comsol.com/support/knowledgebase/1001
+* COMSOL reference documentation: https://doc.comsol.com/
+* OpenFOAM parallel running: https://doc.openfoam.com/2306/tools/parallel/
+* Silvaco: https://silvaco.com/ — ATLAS manual mirror: https://www.eng.buffalo.edu/~wie/silvaco/atlas_user_manual.pdf
+* Synopsys Sentaurus: https://www.synopsys.com/ — SWB course notes: https://web.stanford.edu/class/ee212/SWB/swb_2.html
 
-URLs and state details vary by release and site configuration: **consult your installed version and manual**.
-Synopsys and Silvaco official manuals require proprietary customer license portal access (e.g. Synopsys SolvNet) and lack unrestricted public canonical URLs; their references above rely on third-party mirrors, academic archives, and historical vendor newsletters.
+Command syntax and state names vary by release and site configuration; adjust
+them for your installed version.
 
 ## Deliberate TODOs (not fake implementations)
 
