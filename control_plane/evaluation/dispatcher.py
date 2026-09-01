@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import datetime
 from pathlib import Path
+from control_plane.core.evaluation_contracts import ContractError
 from typing import Any, Protocol
 
 from control_plane.evaluation.service import EvaluationMiddleware
@@ -130,34 +131,60 @@ class SessionLifecycleDispatcher:
                     )
                     termination_result = {
                         "attempt_id": attempt_id,
+                        "session_ref": session_ref,
                         "termination": "unavailable",
                     }
                 else:
                     try:
                         raw_outcome = fn(session_ref)
-                    except Exception:
-                        # Uncertain worker failures leave requested for retry.
+                    except Exception as exc:
+                        # Uncertain worker failures leave requested for retry,
+                        # but expose the adapter failure to the caller.
                         termination_result = {
                             "attempt_id": attempt_id,
+                            "session_ref": session_ref,
                             "termination": "requested",
+                            "error": {
+                                "kind": "adapter_exception",
+                                "type": type(exc).__name__,
+                                "message": str(exc),
+                            },
                         }
                     else:
-                        outcome = normalize_session_termination(raw_outcome)
-                        if outcome in {"terminated", "absent"}:
-                            self.middleware.update_termination_state(
-                                attempt_id, "confirmed", now=now
-                            )
+                        try:
+                            outcome = normalize_session_termination(raw_outcome)
+                        except ContractError as exc:
+                            # Invalid adapter values are contract failures at
+                            # this boundary; retain requested for retry.
                             termination_result = {
                                 "attempt_id": attempt_id,
-                                "termination": "confirmed",
-                                "outcome": outcome,
+                                "session_ref": session_ref,
+                                "termination": "requested",
+                                "error": {
+                                    "kind": "invalid_adapter_outcome",
+                                    "type": type(exc).__name__,
+                                    "message": str(exc),
+                                    "raw_outcome": repr(raw_outcome),
+                                },
                             }
                         else:
-                            termination_result = {
-                                "attempt_id": attempt_id,
-                                "termination": "requested",
-                                "outcome": outcome,
-                            }
+                            if outcome in {"terminated", "absent"}:
+                                self.middleware.update_termination_state(
+                                    attempt_id, "confirmed", now=now
+                                )
+                                termination_result = {
+                                    "attempt_id": attempt_id,
+                                    "session_ref": session_ref,
+                                    "termination": "confirmed",
+                                    "outcome": outcome,
+                                }
+                            else:
+                                termination_result = {
+                                    "attempt_id": attempt_id,
+                                    "session_ref": session_ref,
+                                    "termination": "requested",
+                                    "outcome": outcome,
+                                }
 
         has_reconciliation = getattr(
             self.middleware, "has_reconciliation_candidate", None

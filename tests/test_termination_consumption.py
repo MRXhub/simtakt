@@ -53,7 +53,6 @@ class TerminationConsumptionTests(unittest.TestCase):
         calls, counted = self._txn_counter()
         with mock.patch.object(self.fx.repository, "_transaction", counted):
             self.assertIsNone(self._dispatcher(mock.Mock()).recover_once(now=BASE_TIME))
-    @unittest.expectedFailure
     def test_unreachable_requested_opens_zero_write_transactions(self):
 
         attempt = self._requested()
@@ -121,7 +120,6 @@ class TerminationConsumptionTests(unittest.TestCase):
         for value in (" RUNNING ", " Completed ", " ABSENT "):
             self.assertEqual(normalize_session_observation(value), str(value).strip().lower())
 
-    @unittest.expectedFailure
     def test_invalid_worker_termination_is_not_allowed_to_crash_recovery(self):
         attempt = self._requested()
         worker = mock.Mock()

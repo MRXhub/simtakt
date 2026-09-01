@@ -1,7 +1,6 @@
 """SQLite WAL persistence for the evaluation middleware control plane."""
 
 from __future__ import annotations
-
 import hashlib
 import json
 import math
@@ -2786,6 +2785,27 @@ class SQLiteEvaluationRepository:
         tier1_min = int(platform.get("tier1_min_samples", 20))
         timestamp = _iso(_utc_now() if now is None else now)
         if not self.has_recovering_evaluations():
+            return []
+        # Avoid opening a write transaction when recovery triage has no
+        # actionable latest attempt.  This is a read-only fast path.
+        with closing(self._connect()) as connection:
+            actionable = connection.execute(
+                """
+                SELECT 1
+                FROM evaluations e
+                JOIN attempts a ON a.evaluation_id = e.evaluation_id
+                WHERE e.status = 'recovering'
+                  AND a.attempt_number = (
+                      SELECT MAX(a2.attempt_number)
+                      FROM attempts a2
+                      WHERE a2.evaluation_id = e.evaluation_id
+                  )
+                  AND a.failure_class IN ('remote-session-not-found',
+                                          'wall-budget-elapsed', 'timeout')
+                LIMIT 1
+                """
+            ).fetchone()
+        if actionable is None:
             return []
         results: list[dict[str, Any]] = []
         with self._transaction() as connection:
