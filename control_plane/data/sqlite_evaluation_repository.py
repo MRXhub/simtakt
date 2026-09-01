@@ -3407,6 +3407,57 @@ class SQLiteEvaluationRepository:
                 """
             ).fetchone() is not None
 
+    def has_pending_terminations(self) -> bool:
+        """Cheap read-only hint for requested session terminations."""
+        with closing(self._connect()) as connection:
+            return connection.execute(
+                """
+                SELECT 1 FROM attempts
+                WHERE termination_state = 'requested' AND session_ref IS NOT NULL
+                LIMIT 1
+                """
+            ).fetchone() is not None
+
+    def get_next_pending_termination(self) -> dict[str, Any] | None:
+        """Return the oldest requested termination and its worker reconstruction data."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM attempts
+                WHERE termination_state = 'requested' AND session_ref IS NOT NULL
+                ORDER BY updated_at, attempt_id
+                LIMIT 1
+                """
+            ).fetchone()
+            return None if row is None else self._attempt_record(row)
+
+    def update_termination_state(
+        self, attempt_id: str, termination_state: str, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Persist a confirmed or unavailable termination result."""
+        state = str(termination_state).strip().lower()
+        if state not in {"confirmed", "unavailable"}:
+            raise RepositoryError("termination_state must be confirmed or unavailable")
+        timestamp = _iso(_utc_now() if now is None else now)
+        with self._transaction() as connection:
+            updated = connection.execute(
+                """
+                UPDATE attempts SET termination_state = ?, updated_at = ?
+                WHERE attempt_id = ? AND termination_state = 'requested'
+                """,
+                (state, timestamp, attempt_id),
+            )
+            if updated.rowcount != 1:
+                raise RepositoryError(
+                    f"Attempt {attempt_id} is not pending termination"
+                )
+            row = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            assert row is not None
+            return self._attempt_record(row)
+
+
     def lease_next_reconciliation(
         self,
         observer_id: str,

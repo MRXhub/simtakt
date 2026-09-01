@@ -734,6 +734,19 @@ class EvaluationMiddleware:
     def has_reconciliation_candidate(self) -> bool:
         return self._repository.has_reconciliation_candidate()
 
+
+    def has_pending_terminations(self) -> bool:
+        return self._repository.has_pending_terminations()
+
+    def get_next_pending_termination(self) -> dict[str, Any] | None:
+        return self._repository.get_next_pending_termination()
+
+    def update_termination_state(
+        self, attempt_id: str, termination_state: str, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        return self._repository.update_termination_state(
+            attempt_id, termination_state, now=now
+        )
     def heartbeat(
         self,
         attempt_id: str,

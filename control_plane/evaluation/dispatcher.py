@@ -13,6 +13,7 @@ from control_plane.evaluation.scheduling import schedule
 from control_plane.simulation.worker import (
     SimulationWorker,
     normalize_session_observation,
+    normalize_session_termination,
 )
 from control_plane.simulation.gateway import ReceiptIntegrityError
 
@@ -112,17 +113,66 @@ class SessionLifecycleDispatcher:
                         item for item in result
                         if item.get("action", "requeued") == "requeued"
                     ]
+        termination_result: dict[str, Any] | None = None
+        has_terminations = getattr(self.middleware, "has_pending_terminations", None)
+        if callable(has_terminations) and has_terminations():
+            get_termination = getattr(
+                self.middleware, "get_next_pending_termination", None
+            )
+            pending = get_termination() if callable(get_termination) else None
+            if pending is not None:
+                attempt_id = pending["attempt_id"]
+                session_ref = pending["session_ref"]
+                fn = getattr(self.worker, "terminate_session", None)
+                if not callable(fn):
+                    self.middleware.update_termination_state(
+                        attempt_id, "unavailable", now=now
+                    )
+                    termination_result = {
+                        "attempt_id": attempt_id,
+                        "termination": "unavailable",
+                    }
+                else:
+                    try:
+                        raw_outcome = fn(session_ref)
+                    except Exception:
+                        # Uncertain worker failures leave requested for retry.
+                        termination_result = {
+                            "attempt_id": attempt_id,
+                            "termination": "requested",
+                        }
+                    else:
+                        outcome = normalize_session_termination(raw_outcome)
+                        if outcome in {"terminated", "absent"}:
+                            self.middleware.update_termination_state(
+                                attempt_id, "confirmed", now=now
+                            )
+                            termination_result = {
+                                "attempt_id": attempt_id,
+                                "termination": "confirmed",
+                                "outcome": outcome,
+                            }
+                        else:
+                            termination_result = {
+                                "attempt_id": attempt_id,
+                                "termination": "requested",
+                                "outcome": outcome,
+                            }
+
         has_reconciliation = getattr(
             self.middleware, "has_reconciliation_candidate", None
         )
         if callable(has_reconciliation) and not has_reconciliation():
-            return None
+            return termination_result
         attempt = self.middleware.lease_next_reconciliation(
             self.dispatcher_id, self.lease_seconds, now=now
         )
         if attempt is None:
-            return None
-        return self.poll_once(attempt["attempt_id"], now=now)
+            return termination_result
+        polled = self.poll_once(attempt["attempt_id"], now=now)
+        if termination_result is not None:
+            return {**polled, "termination_action": termination_result}
+        return polled
 
     def poll_once(
         self, attempt_id: str, *, now: datetime | None = None

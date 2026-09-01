@@ -20,6 +20,20 @@ SESSION_START_OUTCOMES = frozenset(
 SESSION_OBSERVATIONS = frozenset(
     {"running", "completed", "absent", "unreachable", "indeterminate"}
 )
+SESSION_TERMINATIONS = frozenset(
+    {"terminated", "absent", "unreachable", "indeterminate"}
+)
+
+
+def normalize_session_termination(value: Any) -> str:
+    termination = str(value).strip().lower()
+    if termination not in SESSION_TERMINATIONS:
+        raise ContractError(
+            "session termination must be terminated, absent, unreachable, or indeterminate"
+        )
+    return termination
+
+
 
 
 class SessionStartFailure(RuntimeError):
@@ -71,3 +85,6 @@ class SimulationWorker(Protocol):
     def collect_session(
         self, session_ref: str
     ) -> tuple[Mapping[str, Any], str]: ...
+
+    # Optional adapter capability: dispatchers probe this with getattr; absence is valid.
+    def terminate_session(self, session_ref: str) -> str: ...
