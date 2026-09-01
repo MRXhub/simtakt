@@ -23,6 +23,19 @@ PID reuse threatens `resume_session`: a new, unrelated process can acquire the o
 The PID file and process existence therefore are insufficient. This adapter requires the
 persisted random token to match the PID file as well, and never relaunches on resume.
 
+On Windows, do not use `os.kill(pid, 0)` to probe liveness: the Windows
+implementation routes that call through `TerminateProcess`, so it kills rather
+than probes. This can create a false pass: the probe itself kills the process,
+then a “process disappeared” assertion appears to prove that termination worked.
+Use `tasklist` for a non-destructive probe instead.
+
+Deterministic numerical failure is expressed as `observe_session == "completed"`
+followed by an `exhausted` result with a `terminal_cause` (here,
+`solver-not-converged`) and a failed `SolverRunRecord`. It is not
+`indeterminate`, because indeterminate does not release capacity and may trigger
+meaningless retries. Known precision loss: core normalizes this to failure class
+`"recovery-exhausted"`.
+
 The convergence TODO asks which file, exact text, and encoding are authoritative. The
 demo currently uses `CONVERGED:` in the log and tolerant UTF-8 decoding; the fake solver's
 `diverge` mode exits zero without that marker. Result extraction is also a TODO: the
@@ -35,6 +48,9 @@ Run exactly from the repository root:
 python examples/adapter-local-process/run_demo.py
 ```
 
-Expected key output includes `normal observe=completed`, `diverge observe=indeterminate`,
-and `tree terminate=terminated ... child_alive=False` (the latter is direct PID liveness
-verification, not inference from `taskkill`'s return code).
+Expected key output includes `normal observe=completed`, `diverge observe=completed`
+and an exhausted result, and `tree terminate=terminated ... child_alive=False`
+(the latter is direct PID liveness verification, not inference from `taskkill`'s
+return code).
+
+

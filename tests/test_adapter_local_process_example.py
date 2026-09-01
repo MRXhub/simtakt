@@ -101,13 +101,32 @@ class AdapterLocalProcessExampleTests(unittest.TestCase):
         self.assertEqual(validate_simulation_session_result(result), result)
         self.assertTrue(str(artifact_id).endswith("solver.log"))
 
-    def test_divergence_is_not_reported_as_completed(self):
+    def test_divergence_is_reported_as_exhausted(self):
         ref = self.start("diverge")
-        state = self.wait_for(lambda: self.worker.observe_session(ref) if self.worker._procs[ref].poll() is not None else None)
-        # This is intentionally weak: the precise non-convergence label is being
-        # established on another lane and must not be coupled to this test.
-        self.assertNotEqual(state, "completed")
-        self.assertIn(state, VALID_STATES)
+        self.wait_for(lambda: self.worker.observe_session(ref) if self.worker._procs[ref].poll() is not None else None)
+        self.assertEqual(self.worker.observe_session(ref), "completed")
+        result, _ = self.worker.collect_session(ref)
+        self.assertEqual(result["status"], "exhausted")
+        self.assertEqual(result["terminal_cause"], "solver-not-converged")
+        self.assertEqual(validate_simulation_session_result(result), result)
+
+    def test_terminate_refuses_mismatched_token(self):
+        ref = self.start("hang")
+        pid_file = self.root / "solver.pid.json"
+        self.wait_for(lambda: pid_file.exists())
+        identity = json.loads(pid_file.read_text(encoding="utf-8"))
+        identity["token"] = "not-the-launch-token"
+        pid_file.write_text(json.dumps(identity), encoding="utf-8")
+        self.assertNotEqual(self.worker.terminate_session(ref), "terminated")
+        self.assertTrue(process_alive(int(identity["pid"])))
+
+    def test_observe_probe_has_no_side_effect(self):
+        ref = self.start("hang")
+        pid = self.worker._procs[ref].pid
+        self.wait_for(lambda: self.worker.observe_session(ref) == "running")
+        for _ in range(5):
+            self.assertEqual(self.worker.observe_session(ref), "running")
+        self.assertTrue(process_alive(pid))
 
     def test_terminate_kills_parent_and_child_process_tree(self):
         ref = self.start("tree")
