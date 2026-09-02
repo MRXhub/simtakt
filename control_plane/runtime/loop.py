@@ -1,10 +1,14 @@
 """Resilient recover/dispatch/poll runtime loop."""
 from __future__ import annotations
 
+import logging
 import signal
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass
@@ -67,16 +71,19 @@ class RuntimeLoop:
                 except Exception as exc:
                     phase_failed[0] = True
                     self.errors.append(("prepare_once", exc))
+                    _LOG.error("prepare_once failed: %s: %s", type(exc).__name__, exc)
             try:
                 progressed = progressed or bool(self.dispatcher.recover_once())
             except Exception as exc:
                 phase_failed[0] = True
                 self.errors.append(("recover_once", exc))
+                _LOG.error("recover_once failed: %s: %s", type(exc).__name__, exc)
             try:
                 progressed = progressed or bool(self.dispatcher.dispatch_once())
             except Exception as exc:
                 phase_failed[1] = True
                 self.errors.append(("dispatch_once", exc))
+                _LOG.error("dispatch_once failed: %s: %s", type(exc).__name__, exc)
 
             # Re-enumerate every round.  Allocation records contain the
             # authoritative attempt_id (repository contract).
@@ -107,11 +114,16 @@ class RuntimeLoop:
                         except Exception as exc:
                             poll_failures += 1
                             self.errors.append((f"poll_once:{attempt_id}", exc))
+                            _LOG.error(
+                                "poll_once failed for %s: %s: %s",
+                                attempt_id, type(exc).__name__, exc,
+                            )
                     if poll_attempts and poll_failures == poll_attempts:
                         phase_failed[2] = True
             except Exception as exc:
                 phase_failed[2] = True
                 self.errors.append(("poll_once", exc))
+                _LOG.error("poll_once failed: %s: %s", type(exc).__name__, exc)
             if all(phase_failed):
                 failures += 1
             else:
