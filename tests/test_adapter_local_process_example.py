@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
 import os
 import shutil
@@ -13,24 +14,37 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "adapter-local-process"
-for p in (ROOT, EXAMPLE):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
-# Discovery may already have imported same-named modules from another example.
-sys.modules.pop("adapter", None)
-sys.modules.pop("run_demo", None)
-from adapter import SimulationWorker
-from run_demo import plan
 
-# Do not leave this example's run_demo in the global module cache: discovery also
-# imports the other examples' identically named run_demo modules.
-sys.modules.pop("run_demo", None)
-sys.path.remove(str(EXAMPLE))
+
+def _load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+_saved = {name: sys.modules.get(name) for name in ("adapter", "run_demo")}
+try:
+    _adapter = _load(EXAMPLE / "adapter.py", "_local_process_adapter")
+    sys.modules["adapter"] = _adapter
+    _run_demo = _load(EXAMPLE / "run_demo.py", "_local_process_run_demo")
+finally:
+    for _name, _module in _saved.items():
+        if _module is None:
+            sys.modules.pop(_name, None)
+        else:
+            sys.modules[_name] = _module
+    sys.modules.pop("_local_process_adapter", None)
+    sys.modules.pop("_local_process_run_demo", None)
+
+SimulationWorker = _adapter.SimulationWorker
+plan = _run_demo.plan
+
 from control_plane.simulation.session_contracts import validate_simulation_session_result
 from control_plane.simulation.worker import SESSION_OBSERVATIONS
-
 VALID_STATES = SESSION_OBSERVATIONS
-
 
 def process_alive(pid: int) -> bool | None:
     """Probe process existence without the destructive Windows os.kill(pid, 0)."""

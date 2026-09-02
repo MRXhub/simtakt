@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 import tempfile
 import unittest
@@ -7,14 +8,33 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "adapter-batch-queue"
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-if str(EXAMPLE) not in sys.path:
-    sys.path.insert(0, str(EXAMPLE))
 
-# The adapter.py module is the single normative import entry point for this example.
-from adapter import BatchQueueWorker
-from fake_queue import FakeBatchQueue
+
+def _load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+_saved = {name: sys.modules.get(name) for name in ("adapter", "fake_queue")}
+try:
+    _fake_queue = _load(EXAMPLE / "fake_queue.py", "_batch_fake_queue")
+    sys.modules["fake_queue"] = _fake_queue
+    _adapter = _load(EXAMPLE / "adapter.py", "_batch_adapter")
+finally:
+    for _name, _module in _saved.items():
+        if _module is None:
+            sys.modules.pop(_name, None)
+        else:
+            sys.modules[_name] = _module
+    sys.modules.pop("_batch_fake_queue", None)
+    sys.modules.pop("_batch_adapter", None)
+
+BatchQueueWorker = _adapter.BatchQueueWorker
+FakeBatchQueue = _fake_queue.FakeBatchQueue
 
 from control_plane.simulation.session_contracts import (
     make_simulation_session_plan,

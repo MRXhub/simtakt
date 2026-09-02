@@ -1,21 +1,42 @@
 from __future__ import annotations
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "adapter-server-session"
-for p in (ROOT, EXAMPLE):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
-from fake_server import FakeServer
-from run_demo import make_plan
-from session_adapter import ServerSessionWorker
-import sys as _sys
-_sys.modules.pop("run_demo", None)  # do not shadow basic-local's run_demo in discovery
-_sys.path.remove(str(EXAMPLE))
-from control_plane.simulation.session_contracts import validate_simulation_session_result
 
+
+def _load(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+_saved = {name: sys.modules.get(name) for name in ("fake_server", "session_adapter", "run_demo")}
+try:
+    _fake_server = _load(EXAMPLE / "fake_server.py", "_server_fake_server")
+    sys.modules["fake_server"] = _fake_server
+    _session_adapter = _load(EXAMPLE / "session_adapter.py", "_server_session_adapter")
+    sys.modules["session_adapter"] = _session_adapter
+    _run_demo = _load(EXAMPLE / "run_demo.py", "_server_run_demo")
+finally:
+    for _name, _module in _saved.items():
+        if _module is None:
+            sys.modules.pop(_name, None)
+        else:
+            sys.modules[_name] = _module
+    for _name in ("_server_fake_server", "_server_session_adapter", "_server_run_demo"):
+        sys.modules.pop(_name, None)
+
+FakeServer = _fake_server.FakeServer
+make_plan = _run_demo.make_plan
+ServerSessionWorker = _session_adapter.ServerSessionWorker
+
+from control_plane.simulation.session_contracts import validate_simulation_session_result
 class ServerSessionExampleTests(unittest.TestCase):
     def setUp(self):
         self.server = FakeServer()
