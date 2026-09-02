@@ -12,12 +12,12 @@ class RuntimeLoop:
     dispatcher: Any
     min_interval: float = 0.1
     max_interval: float = 30.0
-    backoff_factor: float = 2.0
     consecutive_failure_limit: int = 3
     sleep: Callable[[float], None] = time.sleep
     should_continue: Callable[[], bool] | None = None
     errors: list[tuple[str, BaseException]] = field(default_factory=list)
     intervals: list[float] = field(default_factory=list)
+    preparer: Any | None = None
 
     def __post_init__(self) -> None:
         if self.min_interval < 0 or self.max_interval < self.min_interval or self.backoff_factor < 1:
@@ -51,6 +51,13 @@ class RuntimeLoop:
             rounds += 1
             progressed = False
             phase_failed = [False, False, False]
+            preparer = self.preparer or getattr(self.dispatcher, "preparer", None)
+            if preparer is not None:
+                try:
+                    progressed = progressed or bool(preparer.prepare_once())
+                except Exception as exc:
+                    phase_failed[0] = True
+                    self.errors.append(("prepare_once", exc))
             try:
                 progressed = progressed or bool(self.dispatcher.recover_once())
             except Exception as exc:

@@ -394,19 +394,21 @@ def make_execution_preparation(
     evaluation_id: str,
     candidate_id: str,
     simulation_proxy: str,
-    numerical_profile: str,
-    recovery_profile_revision: str,
-    task_id: str,
-    authorization_id: str,
-    authorization_revision: str,
+    numerical_profile: str = "default",
+    recovery_profile_revision: str = "sha256:" + "0" * 64,
     command_timeout_seconds: int,
     max_solver_runs: int,
     max_wall_seconds: int,
     execution_option_set: Mapping[str, Any],
     performance_profile_snapshot: Mapping[str, Any],
     calibration: Mapping[str, Any] | None = None,
-    authorizations: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Bind an evaluation to adapter-derived execution choices.
+
+    ``numerical_profile`` defaults to ``"default"`` and
+    ``recovery_profile_revision`` to the all-zero SHA-256 revision when an
+    adapter does not publish these optional fields.
+    """
     """Bind scientific identity to approved choices without selecting one."""
 
     evaluation = _text(evaluation_id, "execution preparation evaluation_id")
@@ -482,60 +484,6 @@ def make_execution_preparation(
             raise ExecutionOptionError(
                 "parallel-efficiency calibration must select one approved option"
             )
-    authorization = {
-        "artifact_id": _text(
-            authorization_id, "execution preparation authorization artifact_id"
-        ),
-        "revision": _revision(
-            authorization_revision,
-            "execution preparation authorization revision",
-        ),
-    }
-    normalized_authorizations: list[dict[str, Any]] = []
-    if authorizations is not None:
-        if isinstance(authorizations, (str, bytes, bytearray)) or not isinstance(
-            authorizations, Sequence
-        ) or not authorizations:
-            raise ExecutionOptionError(
-                "execution preparation authorizations must be an array"
-            )
-        for item in authorizations:
-            if not isinstance(item, Mapping):
-                raise ExecutionOptionError(
-                    "execution preparation authorization reference is invalid"
-                )
-            reference = {
-                "artifact_id": _text(
-                    item.get("artifact_id"),
-                    "execution preparation authorization artifact_id",
-                ),
-                "revision": _revision(
-                    item.get("revision"),
-                    "execution preparation authorization revision",
-                ),
-            }
-            if "target_id" in item:
-                reference["target_id"] = _text(
-                    item.get("target_id"),
-                    "execution preparation authorization target_id",
-                )
-            normalized_authorizations.append(reference)
-        if len(normalized_authorizations) < 2:
-            raise ExecutionOptionError(
-                "execution preparation authorizations must contain multiple references"
-            )
-        if normalized_authorizations[0]["artifact_id"] != authorization["artifact_id"] or normalized_authorizations[0]["revision"] != authorization["revision"]:
-            raise ExecutionOptionError(
-                "execution preparation authorization does not match its first reference"
-            )
-        identities = [
-            (item["artifact_id"], item["revision"])
-            for item in normalized_authorizations
-        ]
-        if len(identities) != len(set(identities)):
-            raise ExecutionOptionError(
-                "execution preparation authorizations contain duplicates"
-            )
 
     body = {
         "schema_version": 1,
@@ -552,8 +500,6 @@ def make_execution_preparation(
             recovery_profile_revision,
             "execution preparation recovery_profile_revision",
         ),
-        "task_id": _text(task_id, "execution preparation task_id"),
-        "authorization": authorization,
         "budget": {
             "command_timeout_seconds": _positive_integer(
                 command_timeout_seconds,
@@ -571,8 +517,6 @@ def make_execution_preparation(
     }
     if calibration_value is not None:
         body["calibration"] = calibration_value
-    if normalized_authorizations:
-        body["authorizations"] = normalized_authorizations
     return {**body, "preparation_id": _content_id("execution-preparation", body)}
 
 
@@ -580,26 +524,21 @@ def validate_execution_preparation(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise ExecutionOptionError("ExecutionPreparation must be an object")
     source = _copy(value)
-    authorization = source.get("authorization")
     budget = source.get("budget")
-    if not isinstance(authorization, Mapping) or not isinstance(budget, Mapping):
-        raise ExecutionOptionError("ExecutionPreparation nested fields are invalid")
+    if not isinstance(budget, Mapping):
+        raise ExecutionOptionError("ExecutionPreparation budget is invalid")
     expected = make_execution_preparation(
         evaluation_id=source.get("evaluation_id"),
         candidate_id=source.get("candidate_id"),
         simulation_proxy=source.get("simulation_proxy"),
         numerical_profile=source.get("numerical_profile"),
         recovery_profile_revision=source.get("recovery_profile_revision"),
-        task_id=source.get("task_id"),
-        authorization_id=authorization.get("artifact_id"),
-        authorization_revision=authorization.get("revision"),
         command_timeout_seconds=budget.get("command_timeout_seconds"),
         max_solver_runs=budget.get("max_solver_runs"),
         max_wall_seconds=budget.get("max_wall_seconds"),
         execution_option_set=source.get("execution_option_set"),
         performance_profile_snapshot=source.get("performance_profile_snapshot"),
         calibration=source.get("calibration"),
-        authorizations=source.get("authorizations"),
     )
     if source != expected:
         raise ExecutionOptionError("ExecutionPreparation is invalid")

@@ -14,8 +14,7 @@ from typing import Any, Mapping
 from control_plane.data.sqlite_evaluation_repository import SQLiteEvaluationRepository
 from control_plane.evaluation.control_plane import resolve_control_plane_database
 from control_plane.evaluation.execution_topology import ProjectFileTargetCatalog, parse_execution_topology
-from control_plane.evaluation.governed_preparation import validate_policy_derived_execution_preparation
-from control_plane.evaluation.prepared_dispatcher import PreparedExecutionDispatcher
+from control_plane.evaluation.preparation_phase import PreparationPhase
 from control_plane.evaluation.project_ports import ProjectFileControlStore
 from control_plane.evaluation.scheduling_policy import resolve_governed_scheduling_policy
 from control_plane.evaluation.service import EvaluationMiddleware
@@ -174,6 +173,7 @@ def compose_runtime(project_root: Path | str) -> RuntimeContext:
                 "component resource_monitor missing required method locked_dispatch for multiple targets"
             )
         repository = SQLiteEvaluationRepository(resolve_control_plane_database(root))
+        repository.target_catalog = target_catalog
         middleware = EvaluationMiddleware(
             repository, project_root=root, control_store=control_store
         )
@@ -188,6 +188,7 @@ def compose_runtime(project_root: Path | str) -> RuntimeContext:
             preparation_governance=governance, scheduling_policy=policy,
             execution_topology=topology,
         )
+        dispatcher.preparer = PreparationPhase(repository, root, window_limit=1)
         return RuntimeContext(
             root, middleware, dispatcher, loaded["worker"],
             loaded["resource_monitor"], loaded, control_store, target_catalog,
