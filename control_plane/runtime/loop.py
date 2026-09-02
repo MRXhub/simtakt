@@ -12,6 +12,7 @@ class RuntimeLoop:
     dispatcher: Any
     min_interval: float = 0.1
     max_interval: float = 30.0
+    backoff_factor: float = 2.0
     consecutive_failure_limit: int = 3
     sleep: Callable[[float], None] = time.sleep
     should_continue: Callable[[], bool] | None = None
@@ -73,7 +74,7 @@ class RuntimeLoop:
             # authoritative attempt_id (repository contract).
             try:
                 middleware = getattr(self.dispatcher, "middleware", None)
-                enumerate_active = getattr(middleware, "list_active_allocations", None)
+                enumerate_active = getattr(middleware, "list_active_allocations", None) or getattr(middleware, "active_allocations", None)
                 if not callable(enumerate_active):
                     progressed = progressed or bool(self.dispatcher.poll_once())
                 else:

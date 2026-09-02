@@ -1,55 +1,35 @@
 # Minimal Runtime Example
 
-This example assembles the governed control-plane runtime and runs three bounded
-rounds. Run it from the repository root with `python examples/minimal-runtime/run_demo.py`,
-or directly with:
+Run the complete self-contained example from the repository root:
 
 ```text
-python -m control_plane.runtime --project-root examples/minimal-runtime --max-rounds 3
+python examples/minimal-runtime/run_demo.py
 ```
+
+The demo creates a disposable `.runtime/` workspace, writes and registers a
+small input package in the artifact catalog, registers a schema that references
+that package, and registers a problem whose simulation capability matches the
+`minimal-simulation` adapter. It then submits a candidate and evaluation,
+runs several bounded runtime rounds, and prints the resulting evaluation
+status. The expected terminal status is `qualified`.
 
 ## Configuration
 
-All project declarations live below `project/`:
+Project declarations live below `project/`:
 
-* `RUNTIME_COMPONENTS.json` has `schema_version: 1` and a `components` array.
-  Each component supplies `name`, importable `module`, `factory`, and integer
-  `interface_version`. The worker and resource monitor names are required.
-  Component `config` values are passed to the factory.
-* `PROJECT_STATE.json` must be schema version 2 and active. Its
-  `scheduling_policy` reference contains exactly `artifact_id`, `revision`, and
-  active `status`.
-* `EXECUTION_TARGETS.json` contains a `targets` array. Each target requires a
-  token `target_id`, `status`, and boolean `formal_execution`; optional
-  `host_id` and `license_pool_id` identify shared capacity.
+* `RUNTIME_COMPONENTS.json` defines the worker and fixed-quota resource monitor.
+* `SIMULATION_ADAPTERS.json` registers the minimal adapter and its capability.
+* `EXECUTION_TARGETS.json` declares the local formal execution target.
+* The scheduling policy artifact is in `config/` and its catalog record is in
+  `records/artifacts/`.
 
-The policy artifact is in `config/scheduling-policy.json` and its registry
-record is in `records/artifacts/`. The policy requires capacity fields
-`processors`, `memory_bytes`, `license_sessions`, `baseline_processors`, and
-`baseline_memory_bytes`, plus priority and preparation timing fields. Keep the
-registry revision equal to the SHA-256 of the policy bytes.
+The demo creates any transient control-plane state it needs and removes it on
+exit. No generated files should remain in the working tree.
 
 ## Replacing the example
 
-Change the component module/factory and component `config` in
-`project/RUNTIME_COMPONENTS.json`. Replace the fixed values in
-`minimal_components.py` with authoritative local CPU/memory, scheduler, and
-license-service adapters (TODO(adapter) marks the integration point), and
-update the policy capacity envelope to match. Update target declarations and
-regenerate the artifact revision according to your installed version.
-
-## Materializing a runnable package
-
-The assembly layer calls the resolved adapter's `materialize_package` method
-with the evaluation input and task; this operation is not performed inside the
-control plane. Adapters are explicitly registered in
-`project/SIMULATION_ADAPTERS.json` using the catalog's required fields.
-
-The resulting package identity is governed by a SHA-256 hash of its
-`manifest.json` (`hash_scope: "package-manifest"`), rather than by a hash of
-any one package file. The `run_materialize_demo.py` entry point demonstrates
-the complete materialize, register, and preparation-binding flow.
-
-The lock uses atomic exclusive file creation and is intentionally only a
-portable example; use the site's distributed allocation/locking authority for
-multiple hosts.
+Replace the fixed worker and monitor in `minimal_components.py` with
+site-specific implementations. An adapter's `materialize_package` receives an
+input template and candidate parameters and must write a package into the
+provided workspace. Update the adapter catalog, target declaration, and policy
+capacity envelope together when changing resource requirements.

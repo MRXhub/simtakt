@@ -11,9 +11,10 @@
       "capabilities": ["minimal-simulation"],
       "resource_defaults": {
         "processors": 1,
-        "memory_bytes": 0,
-        "max_wall_seconds": 0
+        "memory_bytes": 1073741824,
+        "max_wall_seconds": 60
       },
+      "performance_class_id": "performance-class:sha256:3333333333333333333333333333333333333333333333333333333333333333",
       "config": {
         "package_dir": "examples/minimal-runtime/.runtime/packages"
       }

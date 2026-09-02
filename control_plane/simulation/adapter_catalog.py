@@ -159,6 +159,7 @@ def load_catalog(project_root: Path | str) -> list[Mapping[str, Any]]:
                     "values must be finite non-negative numbers",
                     adapter_id,
                 )
+        result.append(dict(entry))
     return result
 
 

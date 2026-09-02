@@ -39,8 +39,8 @@ class PreparationPhase:
         if problem.get("status") == "paused":
             raise ValueError("problem is paused")
         adapter = resolve_adapter_for_problem(self.project_root, problem)
-        schema = self.repository.get_schema(problem["parameter_schema_revision"])
-        canonical = schema.get("canonical_json", schema)
+        schema = self.repository.get_schema_document(problem["parameter_schema_revision"])
+        canonical = schema.get("schema", schema) if isinstance(schema, Mapping) else schema
         package = canonical.get("source_package") if isinstance(canonical, Mapping) else None
         if not isinstance(package, Mapping):
             raise ValueError("schema source_package is missing")
@@ -57,7 +57,7 @@ class PreparationPhase:
         definition = adapter.entry.get("simulation_definition", package)
         option = make_execution_option(simulation_definition_artifact_id=str(definition["artifact_id"]), simulation_definition_revision=str(definition["revision"]), runnable_package_artifact_id=aid, runnable_package_revision=rev, target_id=target_id, processors=int(resources["processors"]), memory_bytes=int(resources["memory_bytes"]), performance_class_id=str(adapter.entry.get("performance_class_id", "default")))
         options = make_execution_option_set([option])
-        profile = make_performance_profile(execution_option_id=option["option_id"], evidence_artifact_id=aid, evidence_revision=rev, sample_count=1, median_seconds=1.0, p90_seconds=1.0, peak_rss_p90_bytes=int(resources["memory_bytes"]), performance_class_id=option["performance_class_id"])
+        profile = make_performance_profile(execution_option_id=option["option_id"], evidence_artifact_id=aid, evidence_revision=rev, sample_count=1, duration_p50_seconds=1, duration_p90_seconds=1, peak_rss_p90_bytes=int(resources["memory_bytes"]), performance_class_id=option["performance_class_id"])
         profiles = make_performance_profile_snapshot(policy_revision=str(adapter.entry.get("policy_revision", rev)), profiles=[profile])
         return make_execution_preparation(evaluation_id=eid, candidate_id=str(candidate["candidate_id"]), simulation_proxy=adapter.adapter_id, numerical_profile=str(adapter.entry.get("numerical_profile", "default")), recovery_profile_revision=str(adapter.entry.get("recovery_profile_revision", "sha256:" + "0"*64)), command_timeout_seconds=int(resources["max_wall_seconds"]), max_solver_runs=1, max_wall_seconds=int(resources["max_wall_seconds"]), execution_option_set=options, performance_profile_snapshot=profiles)
 
@@ -67,8 +67,8 @@ class PreparationPhase:
         if not limit:
             return 0
         items = self.repository.list_queued_evaluations(limit=None)
-        items.sort(key=lambda x: (-str(x.get("priority", "normal")), str(x.get("queued_since", x.get("created_at", "")))))
-        claimed = self.repository.claim_preparation_slots([str(x["evaluation_id"]) for x in items], window_limit=self.window_limit, controller_id=self.controller_id)
+        items.sort(key=lambda x: (str(x.get("queued_since", x.get("created_at", ""))), str(x.get("evaluation_id", ""))))
+        claimed = self.repository.claim_preparation_slots([str(x["evaluation_id"]) for x in items], window_limit=self.window_limit, controller_id=self.controller_id, lease_seconds=60)
         count = 0
         for item in claimed[:limit]:
             try:
@@ -77,7 +77,6 @@ class PreparationPhase:
                 count += 1
             except OSError as exc:
                 _LOG.warning("preparation skipped for %s: %s", item.get("evaluation_id"), exc)
-            except Exception as exc:
-                self.repository.release_preparation_claim(item["claim_id"], self.controller_id)
+                self.repository.release_preparation_claim(item["claim_id"], self.controller_id, reason=f"preparation-failed: {exc}")
                 self.repository.mark_unresolved(str(item["evaluation_id"]), reason=f"preparation-failed: {exc}")
         return count

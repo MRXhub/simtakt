@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "record_kind": "artifact-catalog-shard",
+  "artifact": {
+    "artifact_id": "package.minimal.input",
+    "kind": "input-package",
+    "status": "active",
+    "latest_revision": "sha256:1069004da3c401dbda5ba8140a81a44911ddcc817c0bcda5bfa1f85bd1b52be2",
+    "revisions": [
+      {
+        "revision": "sha256:1069004da3c401dbda5ba8140a81a44911ddcc817c0bcda5bfa1f85bd1b52be2",
+        "hash_scope": "package-manifest",
+        "locations": [
+          {
+            "storage": "workspace",
+            "role": "primary",
+            "availability": "current",
+            "path": ".runtime/input-package"
+          }
+        ]
+      }
+    ]
+  }
+}

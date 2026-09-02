@@ -58,11 +58,23 @@ class FixedQuotaResourceMonitor:
         return artifact_id, path
 
 class MinimalWorker:
-    def __init__(self, entry: Mapping[str, Any]): self.sessions: dict[str, str] = {}; self.delay = float(entry.get("config", {}).get("delay_seconds", 0.001))
+    def __init__(self, entry: Mapping[str, Any]):
+        self.sessions: dict[str, str] = {}
+        self.delay = float(entry.get("config", {}).get("delay_seconds", 0.001))
+        self.adapter = MinimalSimulationAdapter({"config": {}})
+
     def start_session(self, plan: Mapping[str, Any], allocation: Mapping[str, Any], session_ref: str) -> None:
-        if session_ref in self.sessions: return
-        self.sessions[session_ref] = "running"
-        if self.delay: time.sleep(self.delay)
+        if session_ref in self.sessions:
+            return
+        workspace = Path(str(allocation.get("remote_workspace_root", ".runtime/workspace")))
+        workspace.mkdir(parents=True, exist_ok=True)
+        self.adapter.package_dir = workspace
+        template = plan.get("template", {"candidate_id": plan.get("candidate_id")})
+        parameters = plan.get("candidate_parameters", {})
+        self.adapter.materialize_package(template if isinstance(template, Mapping) else {}, parameters if isinstance(parameters, Mapping) else {})
+        self.sessions[session_ref] = "completed"
+        if self.delay:
+            time.sleep(self.delay)
     def resume_session(self, plan: Mapping[str, Any], allocation: Mapping[str, Any], session_ref: str) -> None:
         self.sessions.setdefault(session_ref, "running")
     def observe_session(self, session_ref: str) -> str: return self.sessions.get(session_ref, "absent")
