@@ -851,13 +851,12 @@ class EvaluationMiddleware:
         collected_artifact_ids: Sequence[str],
         completed: Mapping[str, Any],
     ) -> None:
-        """Best-effort adapter qualification after an Attempt completes."""
+        """Qualify a completed attempt, marking its Evaluation unresolved on failure."""
         if not isinstance(completed, Mapping) or completed.get("status") != "qualifying":
             return
-        if self._project_root is None:
-            _LOGGER.info("qualification skipped: no project adapter root configured")
-            return
         try:
+            if self._project_root is None:
+                raise AdapterCatalogError("adapter root is not configured")
             attempt = self._repository.get_attempt(attempt_id)
             evaluation_input = self._repository.get_evaluation_input(attempt["evaluation_id"])
             candidate = evaluation_input["candidate"]
@@ -879,13 +878,16 @@ class EvaluationMiddleware:
             if not isinstance(report, Mapping):
                 raise ContractError("adapter qualification report must be an object")
             self.record_qualification(report)
+        except RepositoryError:
+            raise
         except Exception as exc:
-            # Qualification is accessory to scheduling; retain qualifying and
-            # expose failures without persisting an invalid report.
+            reason = f"qualification-failed: {exc}"
             _LOGGER.warning(
-                "adapter qualification unavailable/failed for attempt %s: %s",
+                "adapter qualification failed for attempt %s: %s",
                 attempt_id, exc, exc_info=True
             )
+            attempt = self._repository.get_attempt(attempt_id)
+            self.mark_unresolved(str(attempt["evaluation_id"]), reason)
 
     def _terminal_feedback(
         self,
