@@ -472,19 +472,8 @@ export async function fetchJSON(path) {
   try {
     const res = await fetch(path, { headers: { Accept: "application/json" } });
     const data = await res.json().catch(() => null);
-    if (!res.ok) {
-      const mock = getMockPayload(path);
-      if (mock && !mock.__http) {
-        return { ok: true, status: 200, data: mock };
-      }
-    }
     return { ok: res.ok, status: res.status, data };
   } catch (err) {
-    // Fall back gracefully to mock fixtures
-    const mock = getMockPayload(path);
-    if (mock && !mock.__http) {
-      return { ok: true, status: 200, data: mock };
-    }
     return { ok: false, status: 0, error: err.message, data: null };
   }
 }

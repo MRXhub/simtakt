@@ -408,6 +408,14 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
         cdState.serverValidationResult = r.data;
         cdState.validation = r.data;
         updatePreflightSection();
+      } else {
+        cdState.serverValidationResult = null;
+        cdState.previewResult = null;
+        cdState.validation = {
+          valid: false,
+          issues: [{ code: "server_validation_error", message: (r && r.data && r.data.error) || t("netError") }]
+        };
+        updatePreflightSection();
       }
     };
     dynamicArea.appendChild(srvValBtn);

@@ -497,15 +497,18 @@ export function renderPackagesView() {
         onclick: async () => {
           let deckText = pkg.deck_file_content || state.packagesDeckText || SAMPLE_DECKS.solar;
           const parseRes = await postJSON("/api/packages/parse", { deck_text: deckText });
-          if (parseRes && parseRes.ok && parseRes.data) {
-            const schemaDoc = buildSchemaDocFromParsed(parseRes.data);
-            schemaDoc.problem_hint = `problem:${pName.replace(/^pkg-/, "")}`;
-            schemaDoc.source_package = { artifact_id: artId, revision: rev };
-            state.schemaDraft.doc = schemaDoc;
-            state.schemaDraft.rawJson = JSON.stringify(schemaDoc, null, 2);
-            state.schemaDraft.registeredRevision = null;
-            state.schemaDraft.mode = "form";
+          if (!parseRes || !parseRes.ok || !parseRes.data) {
+            parseMsg.className = "submit-msg err";
+            parseMsg.textContent = (parseRes && parseRes.data && parseRes.data.error) || t("netError") || "Network error";
+            return;
           }
+          const schemaDoc = buildSchemaDocFromParsed(parseRes.data);
+          schemaDoc.problem_hint = `problem:${pName.replace(/^pkg-/, "")}`;
+          schemaDoc.source_package = { artifact_id: artId, revision: rev };
+          state.schemaDraft.doc = schemaDoc;
+          state.schemaDraft.rawJson = JSON.stringify(schemaDoc, null, 2);
+          state.schemaDraft.registeredRevision = null;
+          state.schemaDraft.mode = "form";
           state.packagesPackageName = pName;
           navigate("#/compose?step=2");
         }
@@ -589,10 +592,12 @@ export function renderPackagesView() {
       buildTable(state.packagesList);
     }
     const r = await fetchJSON("/api/packages");
-    let packages = (r && r.ok && r.data && (r.data.items || r.data.packages || (Array.isArray(r.data) ? r.data : []))) || [];
-    if (packages.length > 0 || !state.packagesList || state.packagesList.length === 0) {
-      state.packagesList = packages;
+    if (!r || !r.ok || !r.data) {
+      catalogTableWrap.appendChild(el("div", "submit-msg err", txt((r && r.data && r.data.error) || t("netError") || "Network error")));
+      return;
     }
+    const packages = r.data.items || r.data.packages || (Array.isArray(r.data) ? r.data : []);
+    state.packagesList = packages;
     buildTable(state.packagesList);
   }
 
@@ -611,17 +616,23 @@ function startPackageJobPolling(jobId, callback) {
 
   packageJobTimer = setInterval(async () => {
     const r = await fetchJSON(`/api/packages/jobs/${encodeURIComponent(jobId)}`);
-    if (r && r.ok && r.data) {
-      state.packagesJobStatus = r.data.status;
-      if (r.data.log_tail) state.packagesJobLogs = r.data.log_tail;
-      if (r.data.package) {
-        state.packagesSchemaRev = r.data.package.revision || state.packagesSchemaRev;
-      }
+    if (!r || !r.ok || !r.data) {
+      clearInterval(packageJobTimer);
+      packageJobTimer = null;
+      state.packagesJobStatus = "failed";
+      state.packagesJobLogs = [(r && r.data && r.data.error) || (r && r.error) || t("netError") || "Network error"];
       if (callback) callback();
-      if (r.data.status === "registered" || r.data.status === "failed") {
-        clearInterval(packageJobTimer);
-        packageJobTimer = null;
-      }
+      return;
+    }
+    state.packagesJobStatus = r.data.status;
+    if (r.data.log_tail) state.packagesJobLogs = r.data.log_tail;
+    if (r.data.package) {
+      state.packagesSchemaRev = r.data.package.revision || state.packagesSchemaRev;
+    }
+    if (callback) callback();
+    if (r.data.status === "registered" || r.data.status === "failed") {
+      clearInterval(packageJobTimer);
+      packageJobTimer = null;
     }
   }, 1000);
 }
