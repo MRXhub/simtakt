@@ -1,4 +1,5 @@
 """Simulator-neutral coordination API for scientific evaluations."""
+from __future__ import annotations
 
 import hashlib
 import json
