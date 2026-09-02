@@ -5,7 +5,7 @@ This is intentionally a fake scheduler adapter: no Slurm/LSF commands are run.
 from __future__ import annotations
 import json
 import re
-from typing import Any, Mapping
+from pathlib import Path
 
 from control_plane.simulation.session_contracts import make_simulation_session_result, make_solver_run_record
 from control_plane.simulation.worker import SessionStartFailure, normalize_session_observation
