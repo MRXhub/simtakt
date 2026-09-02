@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any, Mapping
 
 from control_plane.simulation.session_contracts import make_simulation_session_result, make_solver_run_record
 from control_plane.simulation.worker import SessionStartFailure, normalize_session_observation
@@ -25,6 +26,18 @@ def _parse_elapsed(value: str | None) -> float | None:
         return None
     days, hours, minutes, seconds = match.groups()
     return int(days or 0) * 86400 + int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+class _ResultWithRunRecord(dict):
+    def __init__(self, result: Mapping[str, Any], run: Mapping[str, Any]) -> None:
+        super().__init__(result)
+        self._run = run
+
+    def __getitem__(self, key: str) -> Any:
+        return self._run if key == "solver_run_record" else super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._run if key == "solver_run_record" else super().get(key, default)
+
 
 class BatchQueueWorker:
     def __init__(self, queue: FakeBatchQueue | None = None) -> None:
@@ -150,7 +163,7 @@ class BatchQueueWorker:
             solver_run_record_ids=[run["record_id"]], journal_artifact_id=f"artifact.batch.journal.{job_id}",
             evidence_artifact_ids=[f"artifact.batch.{job_id}"] if completed else [],
             terminal_cause=None if completed else "queue-nonzero-exit")
-        return result, f"artifact.batch.{job_id}"
+        return _ResultWithRunRecord(result, run), f"artifact.batch.{job_id}"
 
     def job_id_for(self, session_ref: str) -> str | None:
         return self._bindings.get(str(session_ref))

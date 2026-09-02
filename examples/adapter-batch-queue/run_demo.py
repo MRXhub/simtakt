@@ -31,7 +31,13 @@ def main() -> None:
         queue.complete(job, 0, elapsed="00:00:00.250")  # active disappears; history remains
         print("after completion observe=", worker.observe_session("session:demo"))
         result, artifact = worker.collect_session("session:demo")
-        print("result status=", result["status"], "elapsed_wall_seconds=", 0.250, "artifact=", artifact)
+        record = result["solver_run_record"]
+        seconds = record["wall_seconds"]
+        if seconds is None:
+            print(f"result status={result['status']} elapsed_wall_seconds=unavailable artifact={artifact}")
+        else:
+            assert seconds > 0
+            print(f"result status={result['status']} elapsed_wall_seconds={seconds:.3f} artifact={artifact}")
 
 if __name__ == "__main__":
     main()
