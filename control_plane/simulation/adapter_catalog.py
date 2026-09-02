@@ -1,8 +1,8 @@
 """Explicit, fail-closed loader for project simulation adapters."""
 from __future__ import annotations
-
 import importlib
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,7 +58,15 @@ def load_catalog(project_root: Path | str) -> list[Mapping[str, Any]]:
 
     result: list[Mapping[str, Any]] = []
     seen: set[str] = set()
-    required = ("adapter_id", "status", "module", "factory", "interface_version")
+    required = (
+        "adapter_id",
+        "status",
+        "module",
+        "factory",
+        "interface_version",
+        "capabilities",
+        "resource_defaults",
+    )
     for index, entry in enumerate(entries):
         entry_path = f"adapters[{index}]"
         if not isinstance(entry, Mapping):
@@ -112,6 +120,38 @@ def load_catalog(project_root: Path | str) -> list[Mapping[str, Any]]:
                 f"expected one of {sorted(PLATFORM_ADAPTER_INTERFACE_VERSIONS)}",
                 adapter_id,
             )
+        capabilities = entry.get("capabilities")
+        if (
+            isinstance(capabilities, (str, bytes, bytearray))
+            or not isinstance(capabilities, list)
+            or not capabilities
+            or any(not isinstance(cap, str) or not cap.strip() for cap in capabilities)
+            or len(set(capabilities)) != len(capabilities)
+        ):
+            raise _catalog_error(
+                f"{entry_path}.capabilities",
+                "expected non-empty array of unique non-empty strings",
+                adapter_id,
+            )
+        resource_defaults = entry.get("resource_defaults")
+        if not isinstance(resource_defaults, Mapping):
+            raise _catalog_error(
+                f"{entry_path}.resource_defaults", "expected object", adapter_id
+            )
+        for resource, value in resource_defaults.items():
+            if (
+                not isinstance(resource, str)
+                or not resource.strip()
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise _catalog_error(
+                    f"{entry_path}.resource_defaults",
+                    "values must be finite non-negative numbers",
+                    adapter_id,
+                )
         result.append(entry)
     return result
 
@@ -170,3 +210,40 @@ def resolve_project_adapters(project_root: Path | str) -> dict[str, ResolvedAdap
         for entry in load_catalog(project_root)
         if entry["status"] in {"active", "experimental"}
     }
+
+
+def resolve_adapter_for_problem(
+    project_root: Path | str, problem: Mapping[str, Any]
+) -> ResolvedAdapter:
+    """Resolve the sole runnable adapter (active or experimental) covering a problem."""
+    capabilities = problem.get("simulation_capabilities")
+    if isinstance(capabilities, (str, bytes, bytearray)) or not isinstance(
+        capabilities, list
+    ):
+        raise AdapterCatalogError("problem simulation_capabilities: expected array")
+    required = set(capabilities)
+    entries = load_catalog(project_root)
+    runnable = [
+        entry for entry in entries if entry["status"] in {"active", "experimental"}
+    ]
+    considered = sorted(str(entry["adapter_id"]) for entry in runnable)
+    matches = [
+        entry for entry in runnable
+        if required.issubset(set(entry["capabilities"]))
+    ]
+    required_text = ", ".join(sorted(str(cap) for cap in required))
+    considered_text = ", ".join(considered) or "(none)"
+    if not matches:
+        raise AdapterCatalogError(
+            "problem simulation_capabilities: no matching adapter "
+            f"(required: [{required_text}], considered: [{considered_text}])"
+        )
+    if len(matches) > 1:
+        matching_text = ", ".join(
+            sorted(str(entry["adapter_id"]) for entry in matches)
+        )
+        raise AdapterCatalogError(
+            "problem simulation_capabilities: multiple matching adapters "
+            f"(matches: [{matching_text}])"
+        )
+    return resolve_adapter(project_root, str(matches[0]["adapter_id"]))

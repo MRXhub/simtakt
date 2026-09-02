@@ -8,6 +8,11 @@
       "module": "examples.minimal-runtime.minimal_components",
       "factory": "simulation_adapter_factory",
       "interface_version": 1,
+      "capabilities": ["minimal-simulation"],
+      "resource_defaults": {
+        "cpu": 1,
+        "memory_bytes": 0
+      },
       "config": {
         "package_dir": "examples/minimal-runtime/.runtime/packages"
       }
