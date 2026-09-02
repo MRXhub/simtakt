@@ -42,15 +42,9 @@ def _register_package() -> dict[str, str]:
 
 def main() -> int:
     shutil.rmtree(RUNTIME, ignore_errors=True)
-    db = ROOT / "data" / "outputs" / "evaluation-middleware" / "control.sqlite3"
-    state = ROOT / "project" / "PROJECT_STATE.json"
     try:
         RUNTIME.mkdir(parents=True)
         identity = _register_package()
-        state.write_text(json.dumps({"schema_version": 2, "status": "active", "scheduling_policy": {
-            "artifact_id": "configuration.project-scheduling-policy.minimal",
-            "revision": "sha256:57865955aa490df9b8cc1ce4cc8f3e4666ea4587dafc705130a60ba47467336d",
-            "status": "active"}}, indent=2) + "\n", encoding="utf-8")
         repo = SQLiteEvaluationRepository(resolve_control_plane_database(ROOT))
         middleware = EvaluationMiddleware(repo, project_root=ROOT)
         schema = make_parameter_schema(parameters=[{"name": "x", "type": "float", "role": "variable", "bounds": {"min": 0.0, "max": 1.0}}], problem_hint="minimal", source_package=identity)
@@ -72,7 +66,6 @@ def main() -> int:
             context.close()
         return 0
     finally:
-        state.unlink(missing_ok=True)
         (ROOT / "records" / "artifacts" / "package.minimal.input.json").unlink(missing_ok=True)
         shutil.rmtree(RUNTIME, ignore_errors=True)
 

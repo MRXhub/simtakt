@@ -44,7 +44,7 @@ _REQUIRED_CAPACITY_FIELDS = frozenset(
     }
 )
 _CAPACITY_FIELDS = _REQUIRED_CAPACITY_FIELDS | {"license_reserve"}
-_STATE_REFERENCE_FIELDS = frozenset({"artifact_id", "revision", "status"})
+_STATE_REFERENCE_FIELDS = frozenset({"artifact_id", "revision"})
 _OPTION_POLICIES = frozenset({"throughput", "latency"})
 _POLICY_SEAL = object()
 
@@ -75,17 +75,6 @@ def _read_json(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise SchedulingPolicyError(f"{label} must be a JSON object")
     return value
-
-
-def _read_state(path: Path) -> tuple[dict[str, Any], str]:
-    try:
-        raw = path.read_bytes()
-        value = json.loads(raw.decode("utf-8-sig"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SchedulingPolicyError("cannot read PROJECT_STATE") from exc
-    if not isinstance(value, dict):
-        raise SchedulingPolicyError("PROJECT_STATE must be a JSON object")
-    return value, "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def _priority_order(value: Any) -> list[str]:
@@ -297,39 +286,53 @@ def resolve_governed_scheduling_policy(
     *,
     control_store: "ControlStore | None" = None,
 ) -> GovernedSchedulingPolicy:
+    """Resolve the active scheduling-policy artifact from RUNTIME_COMPONENTS.json.
+
+    The policy binding now lives in the assembly document that builds the
+    runtime (``project/RUNTIME_COMPONENTS.json``) rather than in a separate
+    PROJECT_STATE envelope.  The policy artifact is still resolved through the
+    workspace artifact registry with an exact revision hash check, and the
+    provenance ``project_state_revision`` field is retained for wire/on-disk
+    compatibility but now carries the sha256 of the components file that binds
+    the policy.
+    """
     root = Path(project_root).resolve()
-    store = control_store
-    if store is None:
-        from control_plane.evaluation.project_ports import ProjectFileControlStore
-        store = ProjectFileControlStore()
+    components_path = root / "project" / "RUNTIME_COMPONENTS.json"
     try:
-        state, state_revision = store.read_project_state_with_revision(root)
-    except (OSError, ValueError) as exc:
-        raise SchedulingPolicyError("cannot read PROJECT_STATE") from exc
-    if state.get("schema_version") != 2 or state.get("status") != "active":
+        raw = components_path.read_bytes()
+        document = json.loads(raw.decode("utf-8-sig"))
+    except FileNotFoundError as exc:
+        raise SchedulingPolicyBlocked(
+            "scheduling-policy-not-configured"
+        ) from exc
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SchedulingPolicyError(
-            "PROJECT_STATE must be active schema version 2"
+            "cannot read project/RUNTIME_COMPONENTS.json"
+        ) from exc
+    if not isinstance(document, Mapping):
+        raise SchedulingPolicyError(
+            "RUNTIME_COMPONENTS.json scheduling_policy reference is invalid"
         )
-    reference = state.get("scheduling_policy")
+    reference = document.get("scheduling_policy")
     if reference is None:
-        raise SchedulingPolicyBlocked("scheduling-policy-not-configured")
+        raise SchedulingPolicyBlocked(
+            "scheduling-policy-not-configured: "
+            "project/RUNTIME_COMPONENTS.json lacks scheduling_policy"
+        )
     if (
         not isinstance(reference, Mapping)
         or set(reference) != _STATE_REFERENCE_FIELDS
     ):
         raise SchedulingPolicyError(
-            "PROJECT_STATE scheduling_policy reference is invalid"
+            "project/RUNTIME_COMPONENTS.json scheduling_policy reference is invalid"
         )
     artifact_id = str(reference.get("artifact_id", ""))
     revision = str(reference.get("revision", "")).lower()
-    if (
-        not _POLICY_ARTIFACT.fullmatch(artifact_id)
-        or not _REVISION.fullmatch(revision)
-        or reference.get("revision") != revision
-        or reference.get("status") != "active"
+    if not _POLICY_ARTIFACT.fullmatch(artifact_id) or not _REVISION.fullmatch(
+        revision
     ):
         raise SchedulingPolicyError(
-            "PROJECT_STATE scheduling_policy reference is invalid"
+            "project/RUNTIME_COMPONENTS.json scheduling_policy reference is invalid"
         )
     try:
         resolved = resolve_workspace_artifact(
@@ -352,6 +355,6 @@ def resolve_governed_scheduling_policy(
         project_root=root,
         artifact_id=artifact_id,
         artifact_revision=revision,
-        project_state_revision=state_revision,
+        project_state_revision="sha256:" + hashlib.sha256(raw).hexdigest(),
         _seal=_POLICY_SEAL,
     )

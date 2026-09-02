@@ -724,7 +724,7 @@ def _validate_policy_derived_preparation(
     if current.tzinfo is None:
         raise GovernedPreparationError("governance time must include a timezone")
     targets = _formal_targets(project_root, target_catalog)
-    target_ids = {str(item["target_id"]) for item in targets}
+    target_ids = {str(item["target_id"]) for item in targets.values()}
     options = normalized["execution_option_set"]["options"]
     if any(str(option["target_id"]) not in target_ids for option in options):
         raise GovernedPreparationError("execution option target is not active in catalog")
