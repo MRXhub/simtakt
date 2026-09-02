@@ -316,6 +316,7 @@ def make_simulation_session_result(
     journal_artifact_id: str,
     evidence_artifact_ids: Sequence[str] = (),
     terminal_cause: str | None = None,
+    solver_run_records: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create the proxy's terminal or indeterminate session receipt."""
 
@@ -340,6 +341,22 @@ def make_simulation_session_result(
     cause = None if terminal_cause is None else _text(terminal_cause, "terminal_cause")
     if outcome == "completed" and cause is not None:
         raise ContractError("completed session cannot have a terminal cause")
+    normalized_records: list[dict[str, Any]] | None = None
+    if solver_run_records is not None:
+        if (
+            isinstance(solver_run_records, (str, bytes, bytearray))
+            or not isinstance(solver_run_records, Sequence)
+        ):
+            raise ContractError("solver_run_records must be an array")
+        normalized_records = [
+            validate_solver_run_record(record)
+            for record in solver_run_records
+        ]
+        if not {record["record_id"] for record in normalized_records}.issubset(
+            set(run_records)
+        ):
+            raise ContractError("solver_run_records contains unknown record_id")
+    
     body = {
         "contract_version": SESSION_CONTRACT_VERSION,
         "plan_id": normalized_plan,
@@ -351,8 +368,9 @@ def make_simulation_session_result(
         "evidence_artifact_ids": evidence,
         "terminal_cause": cause,
     }
+    if normalized_records is not None:
+        body["solver_run_records"] = normalized_records
     return {**body, "result_id": _hash_identity("simulation-result", body)}
-
 
 def validate_simulation_session_result(value: Any) -> dict[str, Any]:
     source = _object(value, "SimulationSessionResult")
@@ -365,6 +383,9 @@ def validate_simulation_session_result(value: Any) -> dict[str, Any]:
         journal_artifact_id=source.get("journal_artifact_id"),
         evidence_artifact_ids=source.get("evidence_artifact_ids"),
         terminal_cause=source.get("terminal_cause"),
+        solver_run_records=source.get("solver_run_records")
+        if "solver_run_records" in source
+        else None,
     )
     if source.get("contract_version") != SESSION_CONTRACT_VERSION:
         raise ContractError(
@@ -375,3 +396,5 @@ def validate_simulation_session_result(value: Any) -> dict[str, Any]:
     if set(source) != set(expected):
         raise ContractError("SimulationSessionResult contains missing or unknown fields")
     return expected
+
+
