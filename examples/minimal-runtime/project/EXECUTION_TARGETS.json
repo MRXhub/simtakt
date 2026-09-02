@@ -1,5 +1,5 @@
 {
   "targets": [
-    {"target_id": "local", "status": "active", "formal_execution": true}
+    {"target_id": "local", "status": "active", "formal_execution": true, "allowed_operations": ["simulation"]}
   ]
 }

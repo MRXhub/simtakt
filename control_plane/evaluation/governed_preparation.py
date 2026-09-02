@@ -371,6 +371,7 @@ def _formal_targets(
     if not isinstance(values, Sequence):
         raise GovernedPreparationError("execution targets must be an array")
     targets: dict[str, Mapping[str, Any]] = {}
+    missing_simulation_operation: list[str] = []
     for item in values:
         if not isinstance(item, Mapping):
             raise GovernedPreparationError("execution target is invalid")
@@ -385,9 +386,21 @@ def _formal_targets(
             and "simulation" in allowed_operations
         ):
             targets[target_id] = item
+        elif (
+            item.get("status") == "active"
+            and item.get("formal_execution") is True
+            and (not isinstance(allowed_operations, list) or "simulation" not in allowed_operations)
+        ):
+            missing_simulation_operation.append(target_id or "<missing target_id>")
     if not targets:
+        detail = (
+            "; active formal target(s) missing allowed_operations='simulation': "
+            + ", ".join(missing_simulation_operation)
+            if missing_simulation_operation
+            else ""
+        )
         raise GovernedPreparationError(
-            "project has no active formal simulation target"
+            "project has no active formal simulation target" + detail
         )
     return targets
 

@@ -1,7 +1,6 @@
 """Dispatch prepared choices without accepting an upstream SessionPlan."""
 
-from __future__ import annotations
-
+import logging
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import nullcontext
@@ -42,6 +41,7 @@ _SESSION_START_OUTCOME_PATHS = {
 }
 if set(_SESSION_START_OUTCOME_PATHS) != set(SESSION_START_OUTCOMES):
     raise RuntimeError("SESSION_START_OUTCOMES lacks an explicit dispatcher path")
+_LOG = logging.getLogger(__name__)
 
 
 
@@ -508,6 +508,13 @@ class PreparedExecutionDispatcher(SessionLifecycleDispatcher):
             "preparation-contract-invalid"
             if isinstance(error, (ExecutionOptionError, ComputeProfileError))
             else "preparation-governance-rejected"
+        )
+        _LOG.warning(
+            "preparation skipped attempt_id=%s preparation_id=%s reason=%s error=%s",
+            attempt_id,
+            preparation_id,
+            reason,
+            error,
         )
         self.middleware.retire_unstarted_preparation(
             attempt_id,
