@@ -725,11 +725,11 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
       em.textContent = t("connecting");
 
       const targetStudyId = (studyPicker && studyPicker.getValue && studyPicker.getValue()) || cdState.studyId || (state.studiesList[0] && (state.studiesList[0].study_id || state.studiesList[0])) || "demo-study-a";
-      const payload = {
+      const r = await postJSON("/api/evaluations", {
         study_id: targetStudyId,
         candidate: cdState.candidateContract,
         request: cdState.requestContract
-      };
+      });
       submitBtn.disabled = false;
 
       if (!r || !r.ok || !r.data) {
