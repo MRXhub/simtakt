@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -40,6 +41,28 @@ def _register_package() -> dict[str, str]:
     return {"artifact_id": "package.minimal.input", "revision": revision}
 
 
+def _unresolved_reason(evaluation_id: str) -> str | None:
+    """Surface the stored reason when an evaluation fails to qualify."""
+    try:
+        with sqlite3.connect(resolve_control_plane_database(ROOT)) as connection:
+            row = connection.execute(
+                "SELECT payload_json FROM state_events "
+                "WHERE aggregate_id = ? AND event_type = 'EvaluationUnresolved' "
+                "ORDER BY sequence DESC LIMIT 1",
+                (evaluation_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    reason = payload.get("reason") if isinstance(payload, dict) else None
+    return reason if isinstance(reason, str) and reason else None
+
+
 def main() -> int:
     shutil.rmtree(RUNTIME, ignore_errors=True)
     try:
@@ -59,9 +82,22 @@ def main() -> int:
         context = compose_runtime(ROOT)
         try:
             loop = RuntimeLoop(context.dispatcher, min_interval=0, max_interval=0)
-            loop.run(max_rounds=5)
-            final = middleware.get_evaluation(evaluation["evaluation_id"])
-            print(f"evaluation terminal status: {final.get('status', final.get('evaluation_status'))}")
+            terminal_status = None
+            for round_no in range(1, 6):
+                loop.run(max_rounds=1)
+                final = middleware.get_evaluation(evaluation["evaluation_id"])
+                terminal_status = final.get("status", final.get("evaluation_status"))
+                print(f"round {round_no}: evaluation status: {terminal_status}")
+                if terminal_status == "qualified":
+                    break
+            if terminal_status != "qualified":
+                reason = _unresolved_reason(evaluation["evaluation_id"])
+                print(
+                    f"qualification failure reason: {reason}"
+                    if reason else
+                    "evaluation did not qualify (no stored unresolved reason)"
+                )
+            print(f"evaluation terminal status: {terminal_status}")
         finally:
             context.close()
         return 0
