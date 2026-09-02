@@ -513,16 +513,24 @@ class SQLiteEvaluationRepository:
                             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                             (SCHEMA_VERSION, _iso()),
                         )
-                    elif int(existing["version"]) != SCHEMA_VERSION:
-                        if int(existing["version"]) < 12:
-                            connection.execute(
-                                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                                (12, _iso()),
+                    else:
+                        # Keep the bookkeeping row for every released migration.
+                        # Older code only inserted v12 while upgrading from a
+                        # pre-v12 database, so deleting v13 (or v14) and
+                        # restarting could leave a misleading migration ledger
+                        # despite the schema being current.
+                        recorded = {
+                            int(row["version"])
+                            for row in connection.execute(
+                                "SELECT version FROM schema_migrations"
                             )
-                        connection.execute(
-                            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                            (SCHEMA_VERSION, _iso()),
-                        )
+                        }
+                        for version in range(12, SCHEMA_VERSION + 1):
+                            if version not in recorded:
+                                connection.execute(
+                                    "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                                    (version, _iso()),
+                                )
                     connection.commit()
                 except Exception:
                     connection.rollback()
