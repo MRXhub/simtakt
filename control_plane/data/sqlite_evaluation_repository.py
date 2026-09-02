@@ -874,8 +874,8 @@ class SQLiteEvaluationRepository:
         if not _SHA256_REVISION.fullmatch(revision):
             raise ContractError("revision must be sha256:<64 lowercase hex characters>")
         status = normalize_token(status, "status")
-        if status not in {"active", "archived"}:
-            raise ContractError("status must be active or archived")
+        if status not in {"active", "paused"}:
+            raise ContractError("status must be active or paused")
         with self._transaction() as connection:
             row = connection.execute(
                 "SELECT definition_json FROM problem_definitions WHERE problem_id = ? AND revision = ?",
