@@ -3,6 +3,13 @@ from __future__ import annotations
 import argparse, json, os, subprocess, sys, time
 from pathlib import Path
 
+def _write_json_atomic(path: Path, payload: object) -> None:
+    """Publish JSON in one rename so readers never observe partial content."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--workspace", required=True)
@@ -11,7 +18,7 @@ def main() -> int:
     p.add_argument("--mode", choices=("normal", "diverge", "hang", "tree", "nonutf8"), default="normal")
     a = p.parse_args()
     root = Path(a.workspace); root.mkdir(parents=True, exist_ok=True)
-    (root / a.pid_file).write_text(json.dumps({"pid": os.getpid(), "token": a.token}), encoding="utf-8")
+    _write_json_atomic(root / a.pid_file, {"pid": os.getpid(), "token": a.token})
     if a.mode == "tree":
         child = subprocess.Popen([sys.executable, __file__, "--workspace", str(root), "--token", a.token + ".child", "--pid-file", "solver.child.pid.json", "--mode", "hang"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         (root / "solver.child.pid").write_text(str(child.pid), encoding="ascii")
