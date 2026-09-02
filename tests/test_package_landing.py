@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from control_plane.core.evaluation_contracts import ContractError
+from control_plane.core.workspace_artifacts import resolve_workspace_artifact
 from control_plane.web.package_landing import (
     PackageLandingError,
     PackageLandingService,
@@ -41,6 +41,49 @@ class PackageLandingDirectUnitTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_shard_preserves_multiple_revisions(self) -> None:
+        records = self.project_root / "records" / "artifacts"
+        records.mkdir(parents=True, exist_ok=True)
+        service = PackageLandingService(
+            self.project_root, packages_dir=self.packages_dir,
+            validator=lambda p: (True, None),
+        )
+        try:
+            for deck in ("go atlas\nset v=1\nend\n", "go atlas\nset v=2\nend\n"):
+                submitted = service.submit_package({
+                    "package_name": "pkg-revisions", "deck_text": deck,
+                })
+                self.assertEqual(service.wait_job(submitted["job_id"])["status"], "registered")
+            shard = json.loads((records / "pkg.pkg-revisions.json").read_text())
+            revisions = shard["artifact"]["revisions"]
+            self.assertEqual(len(revisions), 2)
+            for entry in revisions:
+                path = self.project_root / entry["locations"][0]["path"]
+                actual = "sha256:" + hashlib.sha256((path / "manifest.json").read_bytes()).hexdigest()
+                resolved = resolve_workspace_artifact(
+                    self.project_root, "pkg.pkg-revisions",
+                    revision=entry["revision"], expected_kind="input-package",
+                )
+                self.assertEqual(resolved.revision, entry["revision"])
+        finally:
+            service.close()
+
+    def test_startup_scans_unreferenced_destination_without_mutation(self) -> None:
+        dest = self.packages_dir / "pkg-orphan"
+        dest.mkdir()
+        sentinel = dest / "sentinel.txt"
+        sentinel.write_text("keep", encoding="utf-8")
+        with self.assertLogs("control_plane.web.package_landing", level="WARNING") as logs:
+            service = PackageLandingService(
+                self.project_root, packages_dir=self.packages_dir,
+                validator=lambda p: (True, None), autostart=False,
+            )
+        try:
+            self.assertTrue(sentinel.is_file())
+            self.assertTrue(any("not referenced by any shard" in line for line in logs.output))
+        finally:
+            service.close()
 
     def test_package_landing_lifecycle_success(self) -> None:
         """Job transitions queued -> staging -> verifying -> registering -> registered."""

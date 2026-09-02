@@ -227,10 +227,9 @@ class PackageLandingService:
     def _scan_artifact_consistency(self) -> None:
         """Warn about shard/destination mismatches without mutating either side."""
         records = self.project_root / "records" / "artifacts"
-        if not records.is_dir():
-            return
         referenced: set[str] = set()
-        for shard_file in records.glob("pkg_*.json"):
+        shard_files = records.glob("pkg.*.json") if records.is_dir() else ()
+        for shard_file in shard_files:
             try:
                 data = json.loads(shard_file.read_text(encoding="utf-8"))
                 revisions = data["artifact"]["revisions"]
@@ -420,7 +419,7 @@ class PackageLandingService:
                     return {
                         "package_name": pkg_dir.name,
                         "artifact_id": manifest.get(
-                            "artifact_id", f"pkg:{pkg_dir.name}"
+                            "artifact_id", f"pkg.{pkg_dir.name}"
                         ),
                         "path": rel,
                         "manifest": manifest,
@@ -545,7 +544,7 @@ class PackageLandingService:
 
             manifest_data = {
                 "schema_version": 2,
-                "artifact_id": f"pkg:{job.package_name}",
+                "artifact_id": f"pkg.{job.package_name}",
                 "package_name": job.package_name,
                 "package_kind": "input-package",
                 "created_at": datetime.now(timezone.utc).isoformat(),
@@ -622,7 +621,7 @@ class PackageLandingService:
             if records_artifacts.is_dir():
                 manifest_path = dest_dir / "manifest.json"
                 manifest_hash = "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest().lower()
-                shard_file = records_artifacts / f"pkg_{job.package_name}.json"
+                shard_file = records_artifacts / f"pkg.{job.package_name}.json"
                 shard_data: dict[str, Any]
                 matching = False
                 if shard_file.exists():
@@ -637,7 +636,7 @@ class PackageLandingService:
                         shard_data.get("schema_version") != 1
                         or shard_data.get("record_kind") != "artifact-catalog-shard"
                         or not isinstance(artifact, dict)
-                        or artifact.get("artifact_id") != f"pkg:{job.package_name}"
+                        or artifact.get("artifact_id") != f"pkg.{job.package_name}"
                         or artifact.get("kind") != "input-package"
                         or artifact.get("status") != "active"
                         or not isinstance(artifact.get("revisions"), list)
@@ -661,7 +660,7 @@ class PackageLandingService:
                     shard_data = {
                         "schema_version": 1, "record_kind": "artifact-catalog-shard",
                         "artifact": {
-                            "artifact_id": f"pkg:{job.package_name}", "kind": "input-package", "status": "active",
+                        "artifact_id": f"pkg.{job.package_name}", "kind": "input-package", "status": "active",
                             "latest_revision": manifest_hash,
                             "revisions": [{"revision": manifest_hash, "hash_scope": "package-manifest",
                                            "locations": [{"storage": "workspace", "role": "primary", "availability": "current", "path": self._rel_path(dest_dir)}]}],
@@ -676,7 +675,7 @@ class PackageLandingService:
             with self._lock:
                 job.status = "registered"
                 job.package = {
-                    "artifact_id": f"pkg:{job.package_name}",
+                    "artifact_id": f"pkg.{job.package_name}",
                     "revision": job.content_hash,
                     "path": self._rel_path(dest_dir),
                 }
@@ -684,7 +683,7 @@ class PackageLandingService:
                 job.updated_at = datetime.now(timezone.utc).isoformat()
                 now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
                 job.log_tail.append(
-                    f"[{now_str}] [registered] Artifact recorded: pkg:{job.package_name} (revision: {job.content_hash[:16]}...). Ready for Problem derivation."
+                    f"[{now_str}] [registered] Artifact recorded: pkg.{job.package_name} (revision: {job.content_hash[:16]}...). Ready for Problem derivation."
                 )
 
         except Exception as exc:
