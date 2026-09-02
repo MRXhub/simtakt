@@ -124,6 +124,16 @@ class ComputeProfileContractsTests(unittest.TestCase):
             make_feedback_observation(success=True, wall_seconds=0)
         with self.assertRaises(ComputeProfileError):
             make_feedback_observation(success=True, wall_seconds=9e99)
+        # A missing adapter duration is honest: sample_count and wall_samples are independent,
+        # and wallless adapters must still contribute to learned success/failure rates.
+        missing = TaskShapeStats(task_class_key=task_class()["key"], target_id="t", profile_revision=REVISION, processors=1)
+        missing.observe(make_feedback_observation(success=True, wall_seconds=None))
+        self.assertEqual((missing.sample_count, missing.success_count, missing.wall_samples, missing.shape()["successful_wall_mean_seconds"]), (1, 1, 0, None))
+        for invalid in (float("nan"), float("inf"), "30"):
+            with self.assertRaises(ComputeProfileError):
+                make_feedback_observation(success=True, wall_seconds=invalid)
+        with self.assertRaises(ComputeProfileError):
+            make_feedback_observation(success=True, wall_seconds=-1)
         stats = TaskShapeStats(task_class_key=task_class()["key"], target_id="t", profile_revision=REVISION, processors=1)
         stats.observe(make_feedback_observation(success=False))
         self.assertEqual((stats.failure_count, stats.wall_samples, stats.wall_mean), (1, 0, None))

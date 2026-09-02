@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import uuid
 from collections.abc import Mapping, Sequence
@@ -60,6 +61,21 @@ def _positive_integer(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ContractError(f"{label} must be a positive integer")
     return value
+
+
+def _positive_metric(value: Any, label: str, *, integer: bool = False) -> float | int | None:
+    """Validate an optional measured duration/resource metric."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ContractError(f"{label} must be a positive finite number or null")
+    if not math.isfinite(float(value)) or float(value) <= 0:
+        raise ContractError(f"{label} must be a positive finite number or null")
+    if integer:
+        if not isinstance(value, int):
+            raise ContractError(f"{label} must be a positive integer or null")
+        return value
+    return float(value)
 
 
 def _tokens(value: Any, label: str, *, allow_empty: bool = True) -> list[str]:
@@ -210,9 +226,11 @@ def make_solver_run_record(
     parent_run_id: str | None = None,
     exit_code: int | None = None,
     artifact_ids: Sequence[str] = (),
+    wall_seconds: float | None = None,
+    cpu_seconds: float | None = None,
+    peak_rss_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Record one governed solver invocation inside a simulation session."""
-
     normalized_plan = normalize_plan_id(plan_id)
     outcome = str(status).strip().lower()
     if outcome not in SOLVER_RUN_STATES:
@@ -243,6 +261,9 @@ def make_solver_run_record(
         "status": outcome,
         "exit_code": exit_code,
         "artifact_ids": artifacts,
+        "wall_seconds": _positive_metric(wall_seconds, "wall_seconds"),
+        "cpu_seconds": _positive_metric(cpu_seconds, "cpu_seconds"),
+        "peak_rss_bytes": _positive_metric(peak_rss_bytes, "peak_rss_bytes", integer=True),
     }
     return {**body, "record_id": _hash_identity("solver-run-record", body)}
 
@@ -263,6 +284,9 @@ def validate_solver_run_record(value: Any) -> dict[str, Any]:
         status=source.get("status"),
         exit_code=source.get("exit_code"),
         artifact_ids=source.get("artifact_ids"),
+        wall_seconds=source.get("wall_seconds"),
+        cpu_seconds=source.get("cpu_seconds"),
+        peak_rss_bytes=source.get("peak_rss_bytes"),
     )
     if source.get("contract_version") != SESSION_CONTRACT_VERSION:
         raise ContractError(

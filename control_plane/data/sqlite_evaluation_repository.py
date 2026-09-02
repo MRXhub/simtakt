@@ -3920,24 +3920,13 @@ class SQLiteEvaluationRepository:
 
     @staticmethod
     def _attempt_wall_seconds(row: sqlite3.Row, terminal_time: str) -> float | None:
-        """Wall-clock seconds from an Attempt's created_at to its terminal time.
+        """Deprecated: Attempt lifecycle time is not solver runtime.
 
-        The Attempt table has no dedicated 'started_at'; ``created_at`` records
-        when the Attempt fact was born and the terminal ``updated_at`` records
-        when it reached a terminal state.  Their difference is the best durable
-        proxy for real wall-clock duration without changing the adapter
-        contract.  Returns None when the interval is missing, zero, or negative
-        (clock skew) so callers never feed a bogus positive wall time.
+        Queueing, preparation, and dispatch are included in these timestamps,
+        so this method intentionally supplies no measurement. Runtime values
+        must come from adapter-reported feedback.
         """
-        try:
-            start = datetime.fromisoformat(str(row["created_at"]))
-            end = datetime.fromisoformat(str(terminal_time))
-            seconds = (end - start).total_seconds()
-            if seconds <= 0 or not math.isfinite(seconds):
-                return None
-            return seconds
-        except (TypeError, ValueError):
-            return None
+        return None
 
     def _record_auto_feedback(
         self, attempt_id: str, *, success: bool, terminal_time: str | None = None

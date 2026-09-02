@@ -84,14 +84,9 @@ def _positive_int(value: Any, label: str) -> int:
 
 
 def _finite_nonnegative_float(value: Any, label: str) -> float:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ComputeProfileError(f"{label} must be a finite nonnegative number")
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ComputeProfileError(
-            f"{label} must be a finite nonnegative number"
-        ) from exc
+    number = float(value)
     if not math.isfinite(number) or number < 0.0:
         raise ComputeProfileError(
             f"{label} must be a finite nonnegative number"
@@ -278,8 +273,15 @@ def make_feedback_observation(
         if rss_bytes is None
         else _bounded_int(rss_bytes, "feedback rss_bytes", MAX_RSS_BYTES)
     )
-    if success and (wall is None or wall <= 0.0):
-        raise ComputeProfileError("successful feedback requires positive wall_seconds")
+    for metric, label in (
+        (wall, "feedback wall_seconds"),
+        (cpu, "feedback cpu_seconds"),
+        (busy, "feedback busy_seconds"),
+    ):
+        if metric is not None and metric <= 0.0:
+            raise ComputeProfileError(f"{label} must be positive when provided")
+    if rss is not None and rss <= 0:
+        raise ComputeProfileError("feedback rss_bytes must be positive when provided")
     body = {
         "success": success,
         "wall_seconds": wall,
