@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 from unittest import mock
@@ -397,6 +397,48 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
         dispatcher.worker = worker
         dispatcher.dispatch_once(now=datetime.now(timezone.utc))
         self.assertEqual(self.middleware.get_attempt(prepared["attempt_id"])["status"], "reconciling")
+    def _make_reconciling_attempt(self) -> tuple[dict, PreparedExecutionDispatcher]:
+        prepared = self.prepare()
+        self.claim_starting(prepared, owner="dispatcher:global", session_ref="session-recovery")
+        self.middleware.confirm_attempt_start(prepared["attempt_id"], "dispatcher:global")
+        self.middleware.require_reconciliation(
+            prepared["attempt_id"],
+            "dispatcher:global",
+            reason="fixture-recovery",
+        )
+        dispatcher = self.dispatcher(FakeResourceMonitor())
+        return prepared, dispatcher
+
+    def test_recover_observes_running_before_wall_proof_and_does_not_lose_attempt(self) -> None:
+        prepared, dispatcher = self._make_reconciling_attempt()
+        worker = RecordingWorker(self.root)
+        worker.resume_session = mock.Mock()
+        worker.observe_session = mock.Mock(return_value="running")
+        dispatcher.worker = worker
+        now = datetime.now(timezone.utc) + timedelta(seconds=3000)
+
+        result = dispatcher.recover_once(now=now)
+
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(self.middleware.get_attempt(prepared["attempt_id"])["status"], "running")
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 1)
+        worker.resume_session.assert_called_once()
+        worker.observe_session.assert_called_once_with("session-recovery")
+
+    def test_recover_absent_marks_lost_and_requeues_after_wall_proof(self) -> None:
+        prepared, dispatcher = self._make_reconciling_attempt()
+        worker = RecordingWorker(self.root)
+        worker.resume_session = mock.Mock()
+        worker.observe_session = mock.Mock(return_value="absent")
+        dispatcher.worker = worker
+        now = datetime.now(timezone.utc) + timedelta(seconds=3000)
+
+        result = dispatcher.recover_once(now=now)
+
+        self.assertEqual(result["status"], "lost")
+        self.assertEqual(self.middleware.get_attempt(prepared["attempt_id"])["status"], "lost")
+        self.assertEqual(dispatcher.last_auto_requeued[0]["action"], "requeued")
 
     def test_deterministic_start_failures_remain_failed(self) -> None:
         for index, outcome in enumerate(("not_started", "preflight_failed", "absent")):
