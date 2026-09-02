@@ -424,6 +424,72 @@ def _validate_resource_neutral_package(
     return
 
 
+def _problem_template_package(
+    project_root: Path, preparation: Mapping[str, Any]
+) -> dict[str, str]:
+    """Resolve the problem's immutable input-package template.
+
+    Policy-derived governance is candidate-agnostic: a runnable package is
+    authorized only when it is exactly the template declared by the problem's
+    parameter schema (``schema_documents.canonical_json.source_package``), the
+    same package ``PreparationPhase`` binds when it materializes the attempt.
+    """
+    evaluation_id = preparation.get("evaluation_id")
+    candidate_id = preparation.get("candidate_id")
+    if not isinstance(evaluation_id, str) or not evaluation_id:
+        raise GovernedPreparationError(
+            "problem template requires a bound evaluation"
+        )
+    try:
+        from control_plane.data.sqlite_evaluation_repository import (
+            SQLiteEvaluationRepository,
+        )
+        from control_plane.evaluation.control_plane import (
+            resolve_control_plane_database,
+        )
+
+        repository = SQLiteEvaluationRepository(
+            resolve_control_plane_database(project_root)
+        )
+        evaluation_input = repository.get_evaluation_input(evaluation_id)
+    except Exception as exc:
+        raise GovernedPreparationError(
+            "problem template is unavailable"
+        ) from exc
+    problem = evaluation_input.get("problem")
+    candidate = evaluation_input.get("candidate")
+    if not isinstance(problem, Mapping) or not isinstance(candidate, Mapping):
+        raise GovernedPreparationError("problem template is unavailable")
+    if candidate_id is not None and candidate.get("candidate_id") != candidate_id:
+        raise GovernedPreparationError(
+            "problem template conflicts with the prepared candidate"
+        )
+    parameter_schema_revision = problem.get("parameter_schema_revision")
+    try:
+        schema = repository.get_schema_document(parameter_schema_revision)
+    except Exception as exc:
+        raise GovernedPreparationError(
+            "problem template is unavailable"
+        ) from exc
+    canonical = schema.get("schema", schema)
+    package = (
+        canonical.get("source_package")
+        if isinstance(canonical, Mapping)
+        else None
+    )
+    if not isinstance(package, Mapping):
+        raise GovernedPreparationError(
+            "problem template source_package is missing"
+        )
+    artifact_id = package.get("artifact_id")
+    revision = package.get("revision")
+    if not isinstance(artifact_id, str) or not isinstance(revision, str):
+        raise GovernedPreparationError(
+            "problem template source_package is missing"
+        )
+    return {"artifact_id": artifact_id, "revision": revision}
+
+
 def _authorization_reference_for_target(
     authorization: Mapping[str, Any] | Sequence[Mapping[str, Any]],
     target_id: str,
@@ -524,27 +590,24 @@ def _validate_options(
                 "execution option package must use package-manifest hash scope"
             )
         manifest = _read_json(resolved.path / "manifest.json", "package manifest")
-        design = manifest.get("design")
-        execution = manifest.get("execution")
-        if (
-            manifest.get("artifact_id") != package["artifact_id"]
-            or not isinstance(design, Mapping)
-            or design.get("candidate_id") != preparation["candidate_id"]
-        ):
+        if manifest.get("artifact_id") != package["artifact_id"]:
             raise GovernedPreparationError(
                 "execution option package conflicts with Candidate"
             )
+        # Policy-derived preparation is candidate-agnostic: the immutable
+        # runnable package must be exactly the problem's template package and
+        # must never freeze a CPU shape.
         if require_resource_neutral_package:
-            _validate_resource_neutral_package(resolved.path, manifest)
-        else:
-            expected_processors = next(iter(package_processors[package_key]))
+            template = _problem_template_package(project_root, preparation)
             if (
-                not isinstance(execution, Mapping)
-                or execution.get("processors") != expected_processors
+                package.get("artifact_id") != template["artifact_id"]
+                or str(package.get("revision", "")).lower()
+                != str(template["revision"]).lower()
             ):
                 raise GovernedPreparationError(
-                    "execution option package conflicts with CPU shape"
+                    "execution option package is not the problem's template"
                 )
+            _validate_resource_neutral_package(resolved.path, manifest)
 
     if len(definitions) != 1:
         raise GovernedPreparationError(

@@ -339,6 +339,14 @@ class PolicyDerivedPreparationTests(unittest.TestCase):
             patch.object(
                 governed_preparation, "_validate_resource_neutral_package"
             ),
+            patch.object(
+                governed_preparation,
+                "_problem_template_package",
+                return_value={
+                    "artifact_id": "package.fixture",
+                    "revision": REVISION,
+                },
+            ),
         ):
             governed_preparation._validate_options(
                 Path("."),
@@ -434,14 +442,19 @@ class PolicyDerivedPreparationTests(unittest.TestCase):
                         stale_policy,
                     )
 
-    def test_attestation_rejects_project_state_revision_drift(self) -> None:
+    def test_attestation_rejects_components_revision_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             _write_project(root)
             stale_policy = resolve_governed_scheduling_policy(root)
-            state_path = root / "project" / "PROJECT_STATE.json"
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+            # The scheduling policy provenance now binds the sha256 of the
+            # runtime assembly document, so a drift in RUNTIME_COMPONENTS.json
+            # (not PROJECT_STATE.json) is what attestation must reject.
+            components_path = root / "project" / "RUNTIME_COMPONENTS.json"
+            components = json.loads(components_path.read_text(encoding="utf-8"))
+            components_path.write_text(
+                json.dumps(components, indent=2), encoding="utf-8"
+            )
 
             with _stub_external_execution_authority():
                 with self.assertRaises(GovernedPreparationError):
