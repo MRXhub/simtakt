@@ -6,6 +6,18 @@ from typing import Any, Mapping
 from fake_server import FakeServer, ServerConnectionError, artifact_id
 from control_plane.simulation.session_contracts import make_simulation_session_result, make_solver_run_record, normalize_session_ref
 
+class _ResultWithRunRecord(dict):
+    def __init__(self, result: Mapping[str, Any], run: Mapping[str, Any]) -> None:
+        super().__init__(result)
+        self._run = run
+
+    def __getitem__(self, key: str) -> Any:
+        return self._run if key == "solver_run_record" else super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._run if key == "solver_run_record" else super().get(key, default)
+
+
 class ServerSessionWorker:
     """Adapter whose durable identity is endpoint/token, not a disk job."""
     def __init__(self, server: FakeServer, state_path: str | Path | None = None) -> None:
@@ -108,7 +120,7 @@ class ServerSessionWorker:
             journal_artifact_id=artifact_id({"journal": ref}),
             evidence_artifact_ids=(artifact_id(exported),),
         )
-        return result, artifact_id(exported)
+        return _ResultWithRunRecord(result, run), artifact_id(exported)
 
 # Friendly aliases used by readers migrating from basic-local.
 SessionWorker = ServerSessionWorker

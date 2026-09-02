@@ -34,9 +34,15 @@ def main(argv=None):
     while worker.observe_session("demo-session") != "completed":
         pass
     result, artifact = worker.collect_session("demo-session")
-    duration = server.sessions["demo-session"].solve_elapsed_seconds
+    record = result["solver_run_record"]
+    duration = record["wall_seconds"]
+    if duration is None:
+        duration_text = "unavailable"
+    else:
+        assert duration > 0
+        duration_text = str(duration)
     worker.terminate_session("demo-session")
-    print(f"server session completed: {result['status']}; measured_wall_seconds={duration}; artifact={artifact}; licenses={server.license_count}")
+    print(f"server session completed: {result['status']}; measured_wall_seconds={duration_text}; artifact={artifact}; licenses={server.license_count}")
     return 0
 
 if __name__ == "__main__":
