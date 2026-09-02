@@ -139,9 +139,6 @@ class ExecutionOptionTests(unittest.TestCase):
             "simulation_proxy": "simulation-session-v1",
             "numerical_profile": "proxy-managed-v1",
             "recovery_profile_revision": REVISION,
-            "task_id": "fixture-task",
-            "authorization_id": "authorization.fixture",
-            "authorization_revision": REVISION,
             "command_timeout_seconds": 600,
             "max_solver_runs": 1,
             "max_wall_seconds": 900,
@@ -151,40 +148,37 @@ class ExecutionOptionTests(unittest.TestCase):
             ),
         }
 
-    def test_multi_authorization_preparation_round_trips(self) -> None:
-        kwargs = self._preparation_kwargs()
-        second = {"artifact_id": "authorization.second", "revision": REVISION, "target_id": "target-b"}
-        preparation = make_execution_preparation(
-            **kwargs,
-            authorizations=[
-                {"artifact_id": "authorization.fixture", "revision": REVISION, "target_id": "target-a"},
-                second,
-            ],
-        )
+    def test_preparation_round_trips_without_authorization_lineage(self) -> None:
+        preparation = make_execution_preparation(**self._preparation_kwargs())
         self.assertEqual(validate_execution_preparation(preparation), preparation)
-        self.assertEqual(preparation["authorizations"][1], second)
+        for removed in ("authorizations", "authorization", "task_id",
+                        "authorization_id", "authorization_revision"):
+            self.assertNotIn(removed, preparation)
 
-    def test_multi_authorization_requires_distinct_complete_lineage(self) -> None:
-        kwargs = self._preparation_kwargs()
+    def test_preparation_rejects_legacy_authorization_and_task_fields(self) -> None:
         cases = (
-            ([{"artifact_id": "authorization.fixture", "revision": REVISION}], "multiple"),
-            ([{"artifact_id": "authorization.other", "revision": REVISION}, {"artifact_id": "authorization.second", "revision": REVISION}], "first reference"),
-            ([{"artifact_id": "authorization.fixture", "revision": REVISION}, {"artifact_id": "authorization.fixture", "revision": REVISION}], "duplicates"),
+            ("authorizations", []),
+            ("authorization", {"artifact_id": "authorization.fixture", "revision": REVISION}),
+            ("task_id", "fixture-task"),
+            ("authorization_id", "authorization.fixture"),
+            ("authorization_revision", REVISION),
         )
-        for authorizations, message in cases:
-            with self.subTest(message=message):
-                with self.assertRaisesRegex(ExecutionOptionError, message):
-                    make_execution_preparation(**kwargs, authorizations=authorizations)
+        for field, value in cases:
+            with self.subTest(field=field):
+                with self.assertRaises(ExecutionOptionError):
+                    validate_execution_preparation(
+                        {**make_execution_preparation(**self._preparation_kwargs()),
+                         field: value}
+                    )
 
     def test_single_authorization_body_has_legacy_shape(self) -> None:
         preparation = make_execution_preparation(**self._preparation_kwargs())
         self.assertNotIn("authorizations", preparation)
-        # Explicitly passing None is the compatibility call path and must be
-        # byte-for-byte identical to omitting the optional argument.
-        explicit = make_execution_preparation(**self._preparation_kwargs(), authorizations=None)
+        self.assertNotIn("authorization", preparation)
+        again = make_execution_preparation(**self._preparation_kwargs())
         self.assertEqual(
             __import__("json").dumps(preparation, sort_keys=True, separators=(",", ":")),
-            __import__("json").dumps(explicit, sort_keys=True, separators=(",", ":")),
+            __import__("json").dumps(again, sort_keys=True, separators=(",", ":")),
         )
 
     def test_preparation_rejects_missing_option_profile(self) -> None:
