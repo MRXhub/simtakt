@@ -812,7 +812,9 @@ class EvaluationMiddleware:
             }
         )
         if normalized["status"] == "completed":
-            observation = self._terminal_feedback(feedback=feedback, success=True)
+            observation = self._terminal_feedback(
+                feedback=feedback, success=True, solver_run_records=normalized.get("solver_run_records")
+            )
             completed = self._repository.complete_attempt(
                 normalized["attempt_id"],
                 worker_id,
@@ -826,7 +828,9 @@ class EvaluationMiddleware:
             )
             return completed
         if normalized["status"] == "exhausted":
-            observation = self._terminal_feedback(feedback=feedback, success=False)
+            observation = self._terminal_feedback(
+                feedback=feedback, success=False, solver_run_records=normalized.get("solver_run_records")
+            )
             return self._repository.fail_attempt(
                 normalized["attempt_id"],
                 worker_id,
@@ -894,19 +898,36 @@ class EvaluationMiddleware:
         *,
         success: bool,
         feedback: Mapping[str, Any] | None,
+        solver_run_records: Sequence[Mapping[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         if feedback is None:
             return None
         if not isinstance(feedback, Mapping):
             raise ContractError("completion feedback is invalid")
+        derived: dict[str, Any] = {}
+        records = solver_run_records or ()
+        for field, record_field, reducer in (
+            ("wall_seconds", "wall_seconds", sum),
+            ("cpu_seconds", "cpu_seconds", sum),
+            ("rss_bytes", "peak_rss_bytes", max),
+        ):
+            values = [record[record_field] for record in records if record.get(record_field) is not None]
+            if values:
+                derived[field] = reducer(values)
         try:
             return validate_feedback_observation(
                 {
                     "success": success,
-                    "wall_seconds": feedback.get("wall_seconds"),
-                    "cpu_seconds": feedback.get("cpu_seconds"),
+                    "wall_seconds": feedback.get("wall_seconds")
+                    if feedback.get("wall_seconds") is not None
+                    else derived.get("wall_seconds"),
+                    "cpu_seconds": feedback.get("cpu_seconds")
+                    if feedback.get("cpu_seconds") is not None
+                    else derived.get("cpu_seconds"),
                     "busy_seconds": feedback.get("busy_seconds"),
-                    "rss_bytes": feedback.get("rss_bytes"),
+                    "rss_bytes": feedback.get("rss_bytes")
+                    if feedback.get("rss_bytes") is not None
+                    else derived.get("rss_bytes"),
                 }
             )
         except ComputeProfileError as exc:
