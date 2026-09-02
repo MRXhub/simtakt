@@ -490,6 +490,28 @@ def _problem_template_package(
     return {"artifact_id": artifact_id, "revision": revision}
 
 
+def _catalog_simulation_definition(
+    project_root: Path, artifact_id: str
+) -> dict[str, str] | None:
+    """Return the derived catalog SimulationDefinition identity when applicable.
+
+    An adapter that does not declare an explicit ``simulation_definition``
+    configuration binds its option to ``configuration.adapter.<adapter_id>`` at
+    the sha256 of the canonical catalog entry; governance verifies that exact
+    identity instead of resolving a workspace file.
+    """
+    try:
+        from control_plane.simulation.adapter_catalog import (
+            find_catalog_simulation_definition,
+        )
+    except Exception:
+        return None
+    try:
+        return find_catalog_simulation_definition(project_root, artifact_id)
+    except Exception:
+        return None
+
+
 def _authorization_reference_for_target(
     authorization: Mapping[str, Any] | Sequence[Mapping[str, Any]],
     target_id: str,
@@ -614,25 +636,39 @@ def _validate_options(
             "execution options do not share one SimulationDefinition"
         )
     definition_id, definition_revision = definitions.pop()
-    try:
-        definition = resolve_workspace_artifact(
-            project_root,
-            definition_id,
-            revision=definition_revision,
-            expected_kind="configuration",
-        )
-    except WorkspaceArtifactError as exc:
+    catalog_definition = _catalog_simulation_definition(
+        project_root, definition_id
+    )
+    if catalog_definition is None:
+        try:
+            definition = resolve_workspace_artifact(
+                project_root,
+                definition_id,
+                revision=definition_revision,
+                expected_kind="configuration",
+            )
+        except WorkspaceArtifactError as exc:
+            raise GovernedPreparationError(
+                "SimulationDefinition is not an exact active configuration"
+            ) from exc
+        if definition.hash_scope != "file":
+            raise GovernedPreparationError(
+                "SimulationDefinition must use file hash scope"
+            )
+    elif str(catalog_definition["revision"]).lower() != str(
+        definition_revision
+    ).lower():
         raise GovernedPreparationError(
-            "SimulationDefinition is not an exact active configuration"
-        ) from exc
-    if definition.hash_scope != "file":
-        raise GovernedPreparationError(
-            "SimulationDefinition must use file hash scope"
+            "SimulationDefinition conflicts with the project adapter catalog"
         )
 
     evidence_documents: dict[tuple[str, str], Mapping[str, Any]] = {}
     for profile in preparation["performance_profile_snapshot"]["profiles"]:
-        evidence = profile["evidence"]
+        evidence = profile.get("evidence")
+        if not isinstance(evidence, Mapping):
+            # Uncalibrated profile for a fresh problem carries no measured
+            # evidence; governance has nothing to cross-check.
+            continue
         evidence_key = (evidence["artifact_id"], evidence["revision"])
         document = evidence_documents.get(evidence_key)
         if document is None:

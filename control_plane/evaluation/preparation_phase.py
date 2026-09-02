@@ -16,10 +16,10 @@ from control_plane.evaluation.execution_options import (
     make_performance_profile, make_performance_profile_snapshot,
     make_execution_preparation,
 )
-from control_plane.simulation.adapter_catalog import resolve_adapter_for_problem
-
-_LOG = logging.getLogger(__name__)
-
+from control_plane.simulation.adapter_catalog import (
+    resolve_adapter_for_problem,
+    simulation_definition_identity,
+)
 
 class PreparationPhase:
     """Prepare at most ``queued`` versus available capacity plus lookahead."""
@@ -54,10 +54,19 @@ class PreparationPhase:
         else:
             target_id = str(target["target_id"])
         resources = adapter.entry["resource_defaults"]
-        definition = adapter.entry.get("simulation_definition", package)
+        declared_definition = adapter.entry.get("simulation_definition")
+        definition = (
+            declared_definition
+            if isinstance(declared_definition, Mapping)
+            else simulation_definition_identity(adapter.entry)
+        )
         option = make_execution_option(simulation_definition_artifact_id=str(definition["artifact_id"]), simulation_definition_revision=str(definition["revision"]), runnable_package_artifact_id=aid, runnable_package_revision=rev, target_id=target_id, processors=int(resources["processors"]), memory_bytes=int(resources["memory_bytes"]), performance_class_id=str(adapter.entry.get("performance_class_id", "default")))
         options = make_execution_option_set([option])
-        profile = make_performance_profile(execution_option_id=option["option_id"], evidence_artifact_id=aid, evidence_revision=rev, sample_count=1, duration_p50_seconds=1, duration_p90_seconds=1, peak_rss_p90_bytes=int(resources["memory_bytes"]), performance_class_id=option["performance_class_id"])
+        # Fresh problems have no measured performance evidence; the profile is
+        # uncalibrated (no evidence artifact) so the scheduler falls back to the
+        # adapter resource defaults instead of a fabricated evidence document.
+        wall = max(1, int(resources.get("max_wall_seconds", 1)))
+        profile = make_performance_profile(execution_option_id=option["option_id"], sample_count=0, duration_p50_seconds=wall, duration_p90_seconds=wall, peak_rss_p90_bytes=int(resources["memory_bytes"]), performance_class_id=option["performance_class_id"])
         profiles = make_performance_profile_snapshot(policy_revision=str(adapter.entry.get("policy_revision", rev)), profiles=[profile])
         return make_execution_preparation(evaluation_id=eid, candidate_id=str(candidate["candidate_id"]), simulation_proxy=adapter.adapter_id, numerical_profile=str(adapter.entry.get("numerical_profile", "default")), recovery_profile_revision=str(adapter.entry.get("recovery_profile_revision", "sha256:" + "0"*64)), command_timeout_seconds=int(resources["max_wall_seconds"]), max_solver_runs=1, max_wall_seconds=int(resources["max_wall_seconds"]), execution_option_set=options, performance_profile_snapshot=profiles)
 

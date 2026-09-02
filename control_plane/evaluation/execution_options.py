@@ -195,8 +195,8 @@ def validate_execution_option_set(value: Mapping[str, Any]) -> dict[str, Any]:
 def make_performance_profile(
     *,
     execution_option_id: str,
-    evidence_artifact_id: str,
-    evidence_revision: str,
+    evidence_artifact_id: str | None = None,
+    evidence_revision: str | None = None,
     sample_count: int,
     duration_p50_seconds: int,
     duration_p90_seconds: int,
@@ -204,7 +204,12 @@ def make_performance_profile(
     performance_class_id: str,
     success_rate_ppm: int = 1_000_000,
 ) -> dict[str, Any]:
-    """Describe observed scheduling performance without changing option identity."""
+    """Describe observed scheduling performance without changing option identity.
+
+    Measured evidence is optional.  A profile that omits ``evidence`` is an
+    ``uncalibrated`` profile for a fresh problem: the scheduler and governance
+    fall back to adapter resource defaults rather than an evidence artifact.
+    """
 
     option_id = _text(execution_option_id, "performance profile option_id")
     if not _OPTION_ID.fullmatch(option_id):
@@ -220,6 +225,9 @@ def make_performance_profile(
     rate = _positive_integer(success_rate_ppm, "performance profile success_rate_ppm")
     if rate > 1_000_000:
         raise ExecutionOptionError("performance profile success_rate_ppm exceeds one")
+    evidence = _optional_evidence(
+        evidence_artifact_id, evidence_revision, "performance profile"
+    )
     body = {
         "schema_version": 3,
         "profile_kind": "execution-performance-profile",
@@ -228,15 +236,6 @@ def make_performance_profile(
             performance_class_id,
             "performance profile performance_class_id",
         ),
-        "evidence": {
-            "artifact_id": _text(
-                evidence_artifact_id,
-                "performance profile evidence artifact_id",
-            ),
-            "revision": _revision(
-                evidence_revision, "performance profile evidence revision"
-            ),
-        },
         "sample_count": _nonnegative_integer(
             sample_count, "performance profile sample_count"
         ),
@@ -247,7 +246,31 @@ def make_performance_profile(
         ),
         "success_rate_ppm": rate,
     }
+    if evidence is not None:
+        body["evidence"] = evidence
     return {**body, "profile_id": _content_id("performance-profile", body)}
+
+
+def _optional_evidence(
+    artifact_id: Any,
+    revision: Any,
+    label: str,
+) -> dict[str, str] | None:
+    """Validate an optional measured-evidence reference.
+
+    An uncalibrated profile for a fresh problem carries no evidence artifact at
+    all.  Both fields must be supplied together, or both omitted.
+    """
+    has_artifact = artifact_id is not None and str(artifact_id).strip() != ""
+    has_revision = revision is not None and str(revision).strip() != ""
+    if not has_artifact and not has_revision:
+        return None
+    if not (has_artifact and has_revision):
+        raise ExecutionOptionError(f"{label} evidence must be complete")
+    return {
+        "artifact_id": _text(artifact_id, f"{label} evidence artifact_id"),
+        "revision": _revision(revision, f"{label} evidence revision"),
+    }
 
 
 def validate_performance_profile(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -255,12 +278,18 @@ def validate_performance_profile(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ExecutionOptionError("PerformanceProfile must be an object")
     source = _copy(value)
     evidence = source.get("evidence")
-    if not isinstance(evidence, Mapping):
+    if evidence is None:
+        evidence_artifact_id = None
+        evidence_revision = None
+    elif not isinstance(evidence, Mapping):
         raise ExecutionOptionError("PerformanceProfile evidence must be an object")
+    else:
+        evidence_artifact_id = evidence.get("artifact_id")
+        evidence_revision = evidence.get("revision")
     expected = make_performance_profile(
         execution_option_id=source.get("execution_option_id"),
-        evidence_artifact_id=evidence.get("artifact_id"),
-        evidence_revision=evidence.get("revision"),
+        evidence_artifact_id=evidence_artifact_id,
+        evidence_revision=evidence_revision,
         sample_count=source.get("sample_count"),
         duration_p50_seconds=source.get("duration_p50_seconds"),
         duration_p90_seconds=source.get("duration_p90_seconds"),

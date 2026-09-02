@@ -1,5 +1,63 @@
-"""Explicit, fail-closed loader for project simulation adapters."""
-from __future__ import annotations
+import hashlib
+import importlib
+import json
+import math
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from control_plane.core.evaluation_contracts import canonical_json
+from control_plane.simulation.adapter_protocol import PLATFORM_ADAPTER_INTERFACE_VERSIONS
+
+
+_CATALOG_SIMULATION_DEFINITION_PREFIX = "configuration.adapter."
+
+
+def simulation_definition_identity(
+    entry: Mapping[str, Any],
+) -> dict[str, str]:
+    """Content identity of an adapter-declared SimulationDefinition.
+
+    When an adapter catalog entry does not declare an explicit
+    ``simulation_definition`` configuration artifact, the runtime binds the
+    option to a derived, content-addressed identity over the canonical catalog
+    entry JSON: ``configuration.adapter.<adapter_id>`` at the sha256 of the
+    entry. Governance verifies exactly this identity against the loaded catalog
+    rather than resolving a workspace file.
+    """
+    adapter_id = str(entry.get("adapter_id", ""))
+    digest = hashlib.sha256(canonical_json(dict(entry)).encode("utf-8")).hexdigest()
+    return {
+        "artifact_id": _CATALOG_SIMULATION_DEFINITION_PREFIX + adapter_id,
+        "revision": "sha256:" + digest,
+    }
+
+
+def is_catalog_simulation_definition(artifact_id: Any) -> bool:
+    return isinstance(artifact_id, str) and artifact_id.startswith(
+        _CATALOG_SIMULATION_DEFINITION_PREFIX
+    )
+
+
+def find_catalog_simulation_definition(
+    project_root: Path | str, artifact_id: str
+) -> dict[str, str] | None:
+    """Return the derived SimulationDefinition identity for a catalog adapter_id.
+
+    Returns ``None`` when the ``artifact_id`` is not a catalog-derived
+    SimulationDefinition or the adapter is not present in the loaded catalog.
+    """
+    if not is_catalog_simulation_definition(artifact_id):
+        return None
+    adapter_id = artifact_id[len(_CATALOG_SIMULATION_DEFINITION_PREFIX):]
+    entry = next(
+        (item for item in load_catalog(project_root) if item.get("adapter_id") == adapter_id),
+        None,
+    )
+    if entry is None:
+        return None
+    return simulation_definition_identity(entry)
 import importlib
 import json
 import math

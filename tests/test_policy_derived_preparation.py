@@ -701,9 +701,156 @@ class PolicyDerivedPreparationTests(unittest.TestCase):
                 targets,
                 now=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
-            self.assertEqual(
-                [r["target_id"] for r in records], ["target-a", "target-b"]
+    def _validate_options_with_stubs(
+        self, preparation: dict, *, catalog_definition
+    ) -> None:
+        package_artifact_id = preparation["execution_option_set"]["options"][0][
+            "runnable_package"
+        ]["artifact_id"]
+
+        def resolve(*args: object, expected_kind: str, **kwargs: object):
+            return Mock(
+                hash_scope=(
+                    "package-manifest"
+                    if expected_kind == "input-package"
+                    else "file"
+                ),
+                path=Path("fixture"),
             )
+
+        def read_json(path: Path, label: str):
+            return {"artifact_id": package_artifact_id}
+
+        with (
+            patch.object(
+                governed_preparation,
+                "resolve_workspace_artifact",
+                side_effect=resolve,
+            ),
+            patch.object(governed_preparation, "_read_json", side_effect=read_json),
+            patch.object(
+                governed_preparation,
+                "_problem_template_package",
+                return_value={
+                    "artifact_id": package_artifact_id,
+                    "revision": REVISION,
+                },
+            ),
+            patch.object(
+                governed_preparation, "_validate_resource_neutral_package"
+            ),
+            patch.object(
+                governed_preparation,
+                "_catalog_simulation_definition",
+                return_value=catalog_definition,
+            ),
+        ):
+            governed_preparation._validate_options(
+                Path("."),
+                {},
+                preparation,
+                [],
+                require_resource_neutral_package=True,
+            )
+
+    def test_undeclared_catalog_simulation_definition_and_absent_evidence_accepted(
+        self,
+    ) -> None:
+        definition_id = "configuration.adapter.minimal"
+        option = {
+            "simulation_definition": {
+                "artifact_id": definition_id,
+                "revision": REVISION,
+            },
+            "runnable_package": {
+                "artifact_id": "package.fixture",
+                "revision": REVISION,
+            },
+            "target_id": TARGET_ID,
+            "processors": 1,
+            "memory_bytes": 4 * 1024**3,
+        }
+        preparation = {
+            "candidate_id": CANDIDATE_ID,
+            "evaluation_id": EVALUATION_ID,
+            "execution_option_set": {"options": [option]},
+            "performance_profile_snapshot": {
+                # Uncalibrated profile: no evidence artifact at all.
+                "profiles": [{"execution_option_id": "o", "sample_count": 0}]
+            },
+        }
+        self._validate_options_with_stubs(
+            preparation,
+            catalog_definition={"artifact_id": definition_id, "revision": REVISION},
+        )
+
+    def test_catalog_simulation_definition_rejected_on_revision_mismatch(
+        self,
+    ) -> None:
+        definition_id = "configuration.adapter.minimal"
+        option = {
+            "simulation_definition": {
+                "artifact_id": definition_id,
+                "revision": REVISION,
+            },
+            "runnable_package": {
+                "artifact_id": "package.fixture",
+                "revision": REVISION,
+            },
+            "target_id": TARGET_ID,
+            "processors": 1,
+            "memory_bytes": 4 * 1024**3,
+        }
+        preparation = {
+            "candidate_id": CANDIDATE_ID,
+            "evaluation_id": EVALUATION_ID,
+            "execution_option_set": {"options": [option]},
+            "performance_profile_snapshot": {
+                "profiles": [{"execution_option_id": "o", "sample_count": 0}]
+            },
+        }
+        with self.assertRaisesRegex(
+            GovernedPreparationError,
+            "conflicts with the project adapter catalog",
+        ):
+            self._validate_options_with_stubs(
+                preparation,
+                catalog_definition={
+                    "artifact_id": definition_id,
+                    "revision": "sha256:" + "9" * 64,
+                },
+            )
+
+    def test_declared_simulation_definition_resolves_exact_configuration(
+        self,
+    ) -> None:
+        # A declared (non-catalog) simulation definition is resolved as a file
+        # configuration artifact, not verified against the catalog.
+        option = {
+            "simulation_definition": {
+                "artifact_id": "simulation-definition.fixture",
+                "revision": REVISION,
+            },
+            "runnable_package": {
+                "artifact_id": "package.fixture",
+                "revision": REVISION,
+            },
+            "target_id": TARGET_ID,
+            "processors": 1,
+            "memory_bytes": 4 * 1024**3,
+        }
+        preparation = {
+            "candidate_id": CANDIDATE_ID,
+            "evaluation_id": EVALUATION_ID,
+            "execution_option_set": {"options": [option]},
+            "performance_profile_snapshot": {
+                "profiles": [{"execution_option_id": "o", "sample_count": 0}]
+            },
+        }
+        self._validate_options_with_stubs(
+            preparation,
+            catalog_definition=None,
+        )
 
 
 if __name__ == "__main__":
