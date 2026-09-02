@@ -1,0 +1,9 @@
+{
+  "schema_version": 2,
+  "status": "active",
+  "scheduling_policy": {
+    "artifact_id": "configuration.project-scheduling-policy.minimal",
+    "revision": "sha256:57865955aa490df9b8cc1ce4cc8f3e4666ea4587dafc705130a60ba47467336d",
+    "status": "active"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "components": [
+    {
+      "name": "worker",
+      "module": "examples.minimal-runtime.minimal_components",
+      "factory": "worker_factory",
+      "interface_version": 1,
+      "config": {"delay_seconds": 0.001}
+    },
+    {
+      "name": "resource_monitor",
+      "module": "examples.minimal-runtime.minimal_components",
+      "factory": "resource_monitor_factory",
+      "interface_version": 1,
+      "config": {
+        "processors": 4,
+        "memory_bytes": 1073741824,
+        "license_sessions": 2,
+        "runtime_dir": "examples/minimal-runtime/.runtime"
+      }
+    }
+  ]
+}

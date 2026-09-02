@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "record_kind": "artifact-catalog-shard",
+  "artifact": {
+    "artifact_id": "configuration.project-scheduling-policy.minimal",
+    "kind": "configuration",
+    "status": "active",
+    "latest_revision": "sha256:57865955aa490df9b8cc1ce4cc8f3e4666ea4587dafc705130a60ba47467336d",
+    "revisions": [{
+      "revision": "sha256:57865955aa490df9b8cc1ce4cc8f3e4666ea4587dafc705130a60ba47467336d",
+      "hash_scope": "file",
+      "locations": [{"storage":"workspace","availability":"available","role":"primary","path":"config/scheduling-policy.json"}]
+    }]
+  }
+}

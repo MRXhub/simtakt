@@ -1,0 +1,1 @@
+{"aging_quantum_seconds":60,"capacity_envelope":{"baseline_memory_bytes":268435456,"baseline_processors":1,"license_sessions":2,"memory_bytes":1073741824,"processors":4},"default_priority":"normal","option_policy":"throughput","policy_kind":"project-scheduling-policy","preparation_claim_seconds":60,"priority_order":["normal"],"schema_version":1,"status":"active"}
