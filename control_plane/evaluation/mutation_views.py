@@ -44,6 +44,15 @@ def build_contract(body: Any) -> dict[str, Any]:
 
 def register_problem(middleware: Any, body: Any) -> dict[str, Any]:
     return middleware.register_problem(_object(body, "ProblemDefinition"))
+def set_problem_status(middleware: Any, body: Any) -> dict[str, Any]:
+    source = _object(body, "Problem status")
+    allowed = {"problem_id", "revision", "status"}
+    unknown = set(source) - allowed
+    if unknown:
+        raise ContractError(f"unknown problem status fields: {', '.join(sorted(unknown))}")
+    if set(source) != allowed:
+        raise ContractError("problem_id, revision, and status are required")
+    return middleware.set_problem_status(**source)
 
 
 def create_study(middleware: Any, body: Any) -> dict[str, Any]:

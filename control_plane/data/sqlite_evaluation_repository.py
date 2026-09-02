@@ -60,7 +60,7 @@ _CAPACITY_HOLDING_ATTEMPT_STATES_SQL = attempt_states_sql(CAPACITY_HOLDING_ATTEM
 _HEARTBEATABLE_ATTEMPT_STATES_SQL = attempt_states_sql(HEARTBEATABLE_ATTEMPT_STATES)
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 _SHA256_REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -184,6 +184,7 @@ class SQLiteEvaluationRepository:
                     problem_id TEXT NOT NULL,
                     revision TEXT NOT NULL,
                     definition_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (problem_id, revision)
                 );
@@ -420,6 +421,14 @@ class SQLiteEvaluationRepository:
                     if "last_heartbeat_at" not in columns:
                         connection.execute(
                             "ALTER TABLE attempts ADD COLUMN last_heartbeat_at TEXT"
+                        )
+                    problem_columns = {
+                        str(row["name"])
+                        for row in connection.execute("PRAGMA table_info(problem_definitions)")
+                    }
+                    if "status" not in problem_columns:
+                        connection.execute(
+                            "ALTER TABLE problem_definitions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"
                         )
                     connection.execute(
                         """CREATE TABLE IF NOT EXISTS attempt_feedback (
@@ -822,9 +831,12 @@ class SQLiteEvaluationRepository:
         """List all registered ProblemDefinition records."""
         with closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT definition_json FROM problem_definitions ORDER BY created_at, problem_id"
+                "SELECT definition_json, status FROM problem_definitions ORDER BY created_at, problem_id"
             ).fetchall()
-            return [json.loads(row["definition_json"]) for row in rows]
+            return [
+                {**json.loads(row["definition_json"]), "status": str(row["status"])}
+                for row in rows
+            ]
 
     def register_problem(self, definition: Mapping[str, Any]) -> dict[str, Any]:
         normalized = validate_problem_definition(definition)
@@ -832,7 +844,7 @@ class SQLiteEvaluationRepository:
         with self._transaction() as connection:
             existing = connection.execute(
                 """
-                SELECT definition_json FROM problem_definitions
+                SELECT definition_json, status FROM problem_definitions
                 WHERE problem_id = ? AND revision = ?
                 """,
                 (normalized["problem_id"], normalized["revision"]),
@@ -841,8 +853,8 @@ class SQLiteEvaluationRepository:
                 connection.execute(
                     """
                     INSERT INTO problem_definitions(
-                        problem_id, revision, definition_json, created_at
-                    ) VALUES (?, ?, ?, ?)
+                        problem_id, revision, definition_json, status, created_at
+                    ) VALUES (?, ?, ?, 'active', ?)
                     """,
                     (
                         normalized["problem_id"],
@@ -853,7 +865,29 @@ class SQLiteEvaluationRepository:
                 )
             elif existing["definition_json"] != definition_json:
                 raise RepositoryError("ProblemDefinition identity collision")
+            normalized = {**normalized, "status": str(existing["status"]) if existing else "active"}
         return normalized
+
+    def set_problem_status(self, problem_id: str, revision: str, status: str) -> dict[str, Any]:
+        problem_id = normalize_token(problem_id, "problem_id")
+        revision = str(revision).strip().lower()
+        if not _SHA256_REVISION.fullmatch(revision):
+            raise ContractError("revision must be sha256:<64 lowercase hex characters>")
+        status = normalize_token(status, "status")
+        if status not in {"active", "archived"}:
+            raise ContractError("status must be active or archived")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT definition_json FROM problem_definitions WHERE problem_id = ? AND revision = ?",
+                (problem_id, revision),
+            ).fetchone()
+            if row is None:
+                raise RepositoryError("unknown ProblemDefinition")
+            connection.execute(
+                "UPDATE problem_definitions SET status = ? WHERE problem_id = ? AND revision = ?",
+                (status, problem_id, revision),
+            )
+            return {**json.loads(row["definition_json"]), "status": status}
 
     @staticmethod
     def _normalize_study(

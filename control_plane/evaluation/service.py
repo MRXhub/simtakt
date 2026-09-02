@@ -224,6 +224,9 @@ class EvaluationMiddleware:
     def register_problem(self, definition: Mapping[str, Any]) -> dict[str, Any]:
         return self._repository.register_problem(validate_problem_definition(definition))
 
+    def set_problem_status(self, problem_id: str, revision: str, status: str) -> dict[str, Any]:
+        return self._repository.set_problem_status(problem_id, revision, status)
+
     def create_study(
         self,
         *,

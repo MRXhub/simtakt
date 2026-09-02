@@ -211,6 +211,7 @@ class DemoMiddleware:
             "metric_schema_revision": "sha256:" + "1" * 64,
             "revision": "sha256:" + "2" * 64,
         }
+        demo_problem["status"] = "active"
         self._problems.append(demo_problem)
 
         demo_study = {
@@ -289,6 +290,12 @@ class DemoMiddleware:
         prob = dict(definition)
         self._problems.append(prob)
         return prob
+    def set_problem_status(self, problem_id: str, revision: str, status: str) -> dict[str, Any]:
+        for problem in self._problems:
+            if problem.get("problem_id") == problem_id and problem.get("revision") == revision:
+                problem["status"] = status
+                return dict(problem)
+        raise RepositoryError(f"unknown ProblemDefinition: {problem_id}")
 
     def create_study(self, **kwargs: Any) -> dict[str, Any]:
         study = dict(kwargs)
@@ -405,6 +412,7 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
         if path not in {
             "/api/contracts/build",
             "/api/problems",
+            "/api/problems/status",
             "/api/studies",
             "/api/evaluations",
             "/api/packages/parse",
@@ -433,6 +441,8 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
                     payload = mutation_views.build_contract(body)
                 elif path == "/api/problems":
                     payload = mutation_views.register_problem(self.server.middleware, body)
+                elif path == "/api/problems/status":
+                    payload = mutation_views.set_problem_status(self.server.middleware, body)
                 elif path == "/api/studies":
                     payload = mutation_views.create_study(self.server.middleware, body)
                 elif path == "/api/evaluations":
