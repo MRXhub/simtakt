@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import secrets
+import socket
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,6 +108,31 @@ def _check(name: str, obj: Any, required: tuple[str, ...], entry: Mapping[str, A
     for method in required:
         if not callable(getattr(obj, method, None)):
             raise RuntimeCompositionError(f"component {name} missing required method {method} ({ref})")
+def _dispatcher_id(root: Path, entries: list[Mapping[str, Any]]) -> str:
+    """Resolve an explicit dispatcher identity or generate a process-unique one."""
+    configured: Any = None
+    try:
+        document = json.loads(
+            (root / "project" / "RUNTIME_COMPONENTS.json").read_text(
+                encoding="utf-8-sig"
+            )
+        )
+        if isinstance(document, Mapping):
+            configured = document.get("dispatcher_id")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    if configured is None:
+        for entry in entries:
+            if entry.get("name") == "dispatcher" and entry.get("dispatcher_id") is not None:
+                configured = entry["dispatcher_id"]
+                break
+    if configured is not None:
+        value = str(configured).strip()
+        if value:
+            return value
+        raise RuntimeCompositionError("dispatcher_id override must be non-empty")
+    return f"runtime:{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(4)}"
+
 
 
 def compose_runtime(project_root: Path | str) -> RuntimeContext:
@@ -156,7 +184,7 @@ def compose_runtime(project_root: Path | str) -> RuntimeContext:
         )
         dispatcher = PreparedExecutionDispatcher(
             middleware, loaded["resource_monitor"], loaded["worker"],
-            dispatcher_id="runtime", lease_seconds=60,
+            dispatcher_id=_dispatcher_id(root, entries), lease_seconds=60,
             preparation_governance=governance, scheduling_policy=policy,
             execution_topology=topology,
         )
