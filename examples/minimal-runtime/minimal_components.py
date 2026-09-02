@@ -24,6 +24,9 @@ class FixedQuotaResourceMonitor:
         self.lock_path = self.root / "resource.lock"
         self.receipts = self.root / "decisions"
         self.receipts.mkdir(parents=True, exist_ok=True)
+        self.remote_workspace_root = str(
+            cfg.get("remote_workspace_root", "/minimal-runtime")
+        )
 
     def open(self) -> None: self.receipts.mkdir(parents=True, exist_ok=True)
     def close(self) -> None: pass
@@ -79,9 +82,43 @@ class FixedQuotaResourceMonitor:
             except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
                 pass
 
+    def _make_snapshot(self, target_id: str) -> dict[str, Any]:
+        quota = self.quota
+        return {
+            "schema_version": 1,
+            "snapshot_kind": "resource-snapshot",
+            "snapshot_revision": "sha256:" + hashlib.sha256(
+                json.dumps(
+                    {
+                        "target_id": target_id,
+                        "processors": quota["processors"],
+                        "memory_bytes": quota["memory_bytes"],
+                        "license_sessions": quota["license_sessions"],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "target_id": target_id,
+            "status": "ready",
+            "available_processors": quota["processors"],
+            "available_memory_bytes": quota["memory_bytes"],
+            "default_request_memory_bytes": max(
+                1, quota["memory_bytes"] // quota["processors"]
+            ),
+            "observed_allocation_keys": [],
+            "reasons": [],
+            "license_sessions_in_use": 0,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "lock_held": True,
+            "target_is_idle": True,
+            "remote_workspace_root": self.remote_workspace_root,
+        }
+
     @contextmanager
     def locked_snapshot(self, target_id: str):
-        with self._lock(): yield {**self.quota, "target_id": target_id}
+        with self._lock():
+            yield self._make_snapshot(target_id)
 
     @contextmanager
     def locked_dispatch(self):
@@ -103,9 +140,9 @@ class MinimalWorker:
     def start_session(self, plan: Mapping[str, Any], allocation: Mapping[str, Any], session_ref: str) -> None:
         if session_ref in self.sessions:
             return
-        workspace = Path(str(allocation.get("remote_workspace_root", ".runtime/workspace")))
-        workspace.mkdir(parents=True, exist_ok=True)
-        self.adapter.package_dir = workspace
+        # The allocation's remote_workspace_root is a POSIX-logical token; the
+        # fake worker materializes into its own configured .runtime package dir
+        # so no drive-root or host path is ever created.
         template = plan.get("template", {"candidate_id": plan.get("candidate_id")})
         parameters = plan.get("candidate_parameters", {})
         self.adapter.materialize_package(template if isinstance(template, Mapping) else {}, parameters if isinstance(parameters, Mapping) else {})
