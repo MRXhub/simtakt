@@ -3,12 +3,11 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from tests.shared_fixtures import write_governed_project
 from control_plane.evaluation.scheduling_policy import (
     GovernedSchedulingPolicy,
     SchedulingPolicyBlocked,
@@ -41,53 +40,14 @@ def policy_body() -> dict:
 
 
 def write_project(root: Path, *, include_reference: bool = True) -> tuple[str, str]:
+    """Write a governed project whose scheduling policy binds via
+    RUNTIME_COMPONENTS.json."""
     artifact_id = "configuration.project-scheduling-policy.default-v1"
-    policy_path = root / "project" / "scheduling-policy.json"
-    policy_path.parent.mkdir(parents=True, exist_ok=True)
-    policy_path.write_text(json.dumps(policy_body()), encoding="utf-8")
-    revision = "sha256:" + hashlib.sha256(policy_path.read_bytes()).hexdigest()
-    shard_path = root / "records" / "artifacts" / f"{artifact_id}.json"
-    shard_path.parent.mkdir(parents=True, exist_ok=True)
-    shard_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "record_kind": "artifact-catalog-shard",
-                "artifact": {
-                    "artifact_id": artifact_id,
-                    "kind": "configuration",
-                    "status": "active",
-                    "latest_revision": revision,
-                    "revisions": [
-                        {
-                            "revision": revision,
-                            "hash_scope": "file",
-                            "locations": [
-                                {
-                                    "storage": "workspace",
-                                    "role": "primary",
-                                    "availability": "required",
-                                    "path": "project/scheduling-policy.json",
-                                }
-                            ],
-                        }
-                    ],
-                },
-            }
-        ),
-        encoding="utf-8",
+    return write_governed_project(
+        root,
+        artifact_id=artifact_id,
+        include_scheduling_policy=include_reference,
     )
-    state = {"schema_version": 2, "status": "active"}
-    if include_reference:
-        state["scheduling_policy"] = {
-            "artifact_id": artifact_id,
-            "revision": revision,
-            "status": "active",
-        }
-    (root / "project" / "PROJECT_STATE.json").write_text(
-        json.dumps(state), encoding="utf-8"
-    )
-    return artifact_id, revision
 
 
 class SchedulingPolicyTests(unittest.TestCase):

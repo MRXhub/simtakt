@@ -28,6 +28,7 @@ from control_plane.evaluation.governed_preparation import (
     attest_policy_derived_execution_preparation,
     validate_policy_derived_execution_preparation,
 )
+from tests.shared_fixtures import write_governed_project
 from control_plane.evaluation.scheduling_policy import (
     resolve_governed_scheduling_policy,
 )
@@ -62,52 +63,16 @@ def _policy_body() -> dict:
 
 
 def _write_project(root: Path, *, policy: dict | None = None) -> None:
-    body = policy or _policy_body()
-    artifact_id = "configuration.project-scheduling-policy.fixture-v1"
-    policy_path = root / "project" / "scheduling-policy.json"
-    policy_path.parent.mkdir(parents=True, exist_ok=True)
-    policy_path.write_text(json.dumps(body), encoding="utf-8")
-    revision = "sha256:" + hashlib.sha256(policy_path.read_bytes()).hexdigest()
-
-    shard_path = root / "records" / "artifacts" / f"{artifact_id}.json"
-    shard_path.parent.mkdir(parents=True, exist_ok=True)
-    shard_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "record_kind": "artifact-catalog-shard",
-                "artifact": {
-                    "artifact_id": artifact_id,
-                    "kind": "configuration",
-                    "status": "active",
-                    "latest_revision": revision,
-                    "revisions": [
-                        {
-                            "revision": revision,
-                            "hash_scope": "file",
-                            "locations": [
-                                {
-                                    "storage": "workspace",
-                                    "role": "primary",
-                                    "availability": "required",
-                                    "path": "project/scheduling-policy.json",
-                                }
-                            ],
-                        }
-                    ],
-                },
-            }
-        ),
-        encoding="utf-8",
+    """Write a governed project (scheduling policy bound in
+    RUNTIME_COMPONENTS.json) plus the policy-derived task envelope."""
+    write_governed_project(
+        root,
+        policy=policy,
+        artifact_id="configuration.project-scheduling-policy.fixture-v1",
     )
     state = {
         "schema_version": 2,
         "status": "active",
-        "scheduling_policy": {
-            "artifact_id": artifact_id,
-            "revision": revision,
-            "status": "active",
-        },
         "active_tasks": [
             {
                 "id": TASK_ID,
@@ -116,9 +81,9 @@ def _write_project(root: Path, *, policy: dict | None = None) -> None:
             }
         ],
     }
-    (root / "project" / "PROJECT_STATE.json").write_text(
-        json.dumps(state), encoding="utf-8"
-    )
+    state_path = root / "project" / "PROJECT_STATE.json"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
 
 
 def _preparation(*, processors: int = 1, memory_bytes: int = 4 * 1024**3) -> dict:
