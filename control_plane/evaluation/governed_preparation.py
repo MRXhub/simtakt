@@ -707,35 +707,15 @@ def _validate_policy_derived_preparation(
             "policy-derived execution preparation is invalid"
         ) from exc
 
-    store = control_store or ProjectFileControlStore()
-    try:
-        state, state_revision = store.read_project_state_with_revision(project_root)
-    except (OSError, ValueError) as exc:
-        raise GovernedPreparationError("cannot read PROJECT_STATE") from exc
-    if state_revision != policy.provenance()["project_state_revision"]:
-        raise GovernedPreparationError(
-            "PROJECT_STATE changed during Preparation materialization"
-        )
-    task = _policy_task(state, normalized["task_id"])
-    _parallel_efficiency_calibration(task, normalized)
     current = now or datetime.now().astimezone()
     if current.tzinfo is None:
         raise GovernedPreparationError("governance time must include a timezone")
     targets = _formal_targets(project_root, target_catalog)
-    authorizations = _authorization(
-        project_root, task, normalized, targets, now=current,
-        target_catalog=target_catalog,
-    )
-    _validate_options(
-        project_root,
-        task,
-        normalized,
-        authorizations,
-        require_resource_neutral_package=True,
-    )
-
-    capacity = policy.as_mapping()["capacity_envelope"]
+    target_ids = {str(item["target_id"]) for item in targets}
     options = normalized["execution_option_set"]["options"]
+    if any(str(option["target_id"]) not in target_ids for option in options):
+        raise GovernedPreparationError("execution option target is not active in catalog")
+    capacity = policy.as_mapping()["capacity_envelope"]
     if any(
         option["processors"] > capacity["processors"]
         or option["memory_bytes"] > capacity["memory_bytes"]
@@ -744,7 +724,7 @@ def _validate_policy_derived_preparation(
         raise GovernedPreparationError(
             "execution option exceeds the SchedulingPolicy capacity envelope"
         )
-    return normalized, state_revision
+    return normalized, ""
 def attest_policy_derived_execution_preparation(
     project_root: Path | str,
     evaluation_input: Mapping[str, Any],

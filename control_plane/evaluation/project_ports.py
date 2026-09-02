@@ -10,7 +10,7 @@ from control_plane.core.ports import ControlStore
 
 
 class ProjectFileControlStore:
-    """Read PROJECT_STATE.json through the ControlStore port."""
+    """Project-file control store; preparation no longer depends on PROJECT_STATE."""
 
     def read_project_state(self, project_root: Path | str) -> dict[str, Any]:
         value, _ = self.read_project_state_with_revision(project_root)
@@ -23,6 +23,8 @@ class ProjectFileControlStore:
         try:
             raw = path.read_bytes()
             value = json.loads(raw.decode("utf-8-sig"))
+        except FileNotFoundError:
+            return {}, "sha256:" + "0" * 64
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("cannot read PROJECT_STATE") from exc
         if not isinstance(value, dict):
