@@ -86,7 +86,7 @@ class SessionLifecycleDispatcher:
         self.last_triage: list[dict[str, Any]] = []
 
     def recover_once(self, *, now: datetime | None = None) -> dict[str, Any] | None:
-        """Apply wall-proof recovery, then claim and observe one session."""
+        """Observe one reconciling session before applying wall-proof recovery."""
 
         self.last_auto_released = []
         self.last_auto_requeued = []
@@ -94,11 +94,47 @@ class SessionLifecycleDispatcher:
         has_expired = getattr(self.middleware, "has_expired_leases", None)
         if not callable(has_expired) or has_expired(now=now):
             self.middleware.expire_leases(now=now)
+        termination_result: dict[str, Any] | None = None
+        has_terminations = getattr(self.middleware, "has_pending_terminations", None)
+        if callable(has_terminations) and has_terminations():
+            get_termination = getattr(self.middleware, "get_next_pending_termination", None)
+            pending = get_termination() if callable(get_termination) else None
+            if pending is not None:
+                attempt_id = pending["attempt_id"]
+                session_ref = pending["session_ref"]
+                fn = getattr(self.worker, "terminate_session", None)
+                if not callable(fn):
+                    self.middleware.update_termination_state(attempt_id, "unavailable", now=now)
+                    termination_result = {"attempt_id": attempt_id, "session_ref": session_ref, "termination": "unavailable"}
+                else:
+                    try:
+                        raw_outcome = fn(session_ref)
+                    except Exception as exc:
+                        termination_result = {"attempt_id": attempt_id, "session_ref": session_ref, "termination": "requested", "error": {"kind": "adapter_exception", "type": type(exc).__name__, "message": str(exc)}}
+                    else:
+                        try:
+                            outcome = normalize_session_termination(raw_outcome)
+                        except ContractError as exc:
+                            termination_result = {"attempt_id": attempt_id, "session_ref": session_ref, "termination": "requested", "error": {"kind": "invalid_adapter_outcome", "type": type(exc).__name__, "message": str(exc), "raw_outcome": repr(raw_outcome)}}
+                        else:
+                            if outcome in {"terminated", "absent"}:
+                                self.middleware.update_termination_state(attempt_id, "confirmed", now=now)
+                                termination_result = {"attempt_id": attempt_id, "session_ref": session_ref, "termination": "confirmed", "outcome": outcome}
+                            else:
+                                termination_result = {"attempt_id": attempt_id, "session_ref": session_ref, "termination": "requested", "outcome": outcome}
+
+        has_reconciliation = getattr(self.middleware, "has_reconciliation_candidate", None)
+        if callable(has_reconciliation) and not has_reconciliation():
+            polled = None
+        else:
+            attempt = self.middleware.lease_next_reconciliation(self.dispatcher_id, self.lease_seconds, now=now)
+            polled = None if attempt is None else self.poll_once(attempt["attempt_id"], now=now)
+
+        # Observe first: an observed running session must not be wall-proofed
+        # as lost in this cycle.
         auto_release = getattr(self.middleware, "auto_release_wall_budget", None)
         if callable(auto_release):
-            has_wall = getattr(
-                self.middleware, "has_reconciling_attempts_for_wall_proof", None
-            )
+            has_wall = getattr(self.middleware, "has_reconciling_attempts_for_wall_proof", None)
             if not callable(has_wall) or has_wall():
                 result = auto_release(now=now)
                 if isinstance(result, list):
@@ -110,93 +146,9 @@ class SessionLifecycleDispatcher:
                 result = auto_requeue(now=now)
                 if isinstance(result, list):
                     self.last_triage = result
-                    self.last_auto_requeued = [
-                        item for item in result
-                        if item.get("action", "requeued") == "requeued"
-                    ]
-        termination_result: dict[str, Any] | None = None
-        has_terminations = getattr(self.middleware, "has_pending_terminations", None)
-        if callable(has_terminations) and has_terminations():
-            get_termination = getattr(
-                self.middleware, "get_next_pending_termination", None
-            )
-            pending = get_termination() if callable(get_termination) else None
-            if pending is not None:
-                attempt_id = pending["attempt_id"]
-                session_ref = pending["session_ref"]
-                fn = getattr(self.worker, "terminate_session", None)
-                if not callable(fn):
-                    self.middleware.update_termination_state(
-                        attempt_id, "unavailable", now=now
-                    )
-                    termination_result = {
-                        "attempt_id": attempt_id,
-                        "session_ref": session_ref,
-                        "termination": "unavailable",
-                    }
-                else:
-                    try:
-                        raw_outcome = fn(session_ref)
-                    except Exception as exc:
-                        # Uncertain worker failures leave requested for retry,
-                        # but expose the adapter failure to the caller.
-                        termination_result = {
-                            "attempt_id": attempt_id,
-                            "session_ref": session_ref,
-                            "termination": "requested",
-                            "error": {
-                                "kind": "adapter_exception",
-                                "type": type(exc).__name__,
-                                "message": str(exc),
-                            },
-                        }
-                    else:
-                        try:
-                            outcome = normalize_session_termination(raw_outcome)
-                        except ContractError as exc:
-                            # Invalid adapter values are contract failures at
-                            # this boundary; retain requested for retry.
-                            termination_result = {
-                                "attempt_id": attempt_id,
-                                "session_ref": session_ref,
-                                "termination": "requested",
-                                "error": {
-                                    "kind": "invalid_adapter_outcome",
-                                    "type": type(exc).__name__,
-                                    "message": str(exc),
-                                    "raw_outcome": repr(raw_outcome),
-                                },
-                            }
-                        else:
-                            if outcome in {"terminated", "absent"}:
-                                self.middleware.update_termination_state(
-                                    attempt_id, "confirmed", now=now
-                                )
-                                termination_result = {
-                                    "attempt_id": attempt_id,
-                                    "session_ref": session_ref,
-                                    "termination": "confirmed",
-                                    "outcome": outcome,
-                                }
-                            else:
-                                termination_result = {
-                                    "attempt_id": attempt_id,
-                                    "session_ref": session_ref,
-                                    "termination": "requested",
-                                    "outcome": outcome,
-                                }
-
-        has_reconciliation = getattr(
-            self.middleware, "has_reconciliation_candidate", None
-        )
-        if callable(has_reconciliation) and not has_reconciliation():
+                    self.last_auto_requeued = [item for item in result if item.get("action", "requeued") == "requeued"]
+        if polled is None:
             return termination_result
-        attempt = self.middleware.lease_next_reconciliation(
-            self.dispatcher_id, self.lease_seconds, now=now
-        )
-        if attempt is None:
-            return termination_result
-        polled = self.poll_once(attempt["attempt_id"], now=now)
         if termination_result is not None:
             return {**polled, "termination_action": termination_result}
         return polled
