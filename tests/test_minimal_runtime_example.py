@@ -19,10 +19,7 @@ FixedQuotaResourceMonitor = _minimal_components.FixedQuotaResourceMonitor
 sys.modules.pop("_minimal_components", None)
 
 class MinimalRuntimeExampleTests(unittest.TestCase):
-    @unittest.expectedFailure
     def test_end_to_end_demo(self):
-        # Current exact error: "SchedulingPolicy is not an exact active artifact".
-        # This is intentionally expected to fail until the example fixture is fixed.
         result = subprocess.run(
             [sys.executable, str(EXAMPLE / "run_demo.py")],
             capture_output=True, text=True, timeout=15,
