@@ -31,16 +31,53 @@ class FixedQuotaResourceMonitor:
     @contextmanager
     def _lock(self):
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + 30.0
+        owner = {"pid": os.getpid(), "created_at": time.time()}
+        payload = json.dumps(owner, sort_keys=True).encode("utf-8")
         while True:
             try:
-                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd); break
+                fd = os.open(
+                    self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY
+                )
+                try:
+                    os.write(fd, payload)
+                finally:
+                    os.close(fd)
+                break
             except FileExistsError:
+                stale = False
+                try:
+                    record = json.loads(self.lock_path.read_text(encoding="utf-8"))
+                    pid = int(record.get("pid", -1))
+                    created = float(record.get("created_at", 0))
+                    stale = time.time() - created > 300
+                    if not stale and pid > 0 and pid != os.getpid():
+                        try:
+                            os.kill(pid, 0)
+                        except (OSError, ProcessLookupError):
+                            stale = True
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    stale = True
+                if stale:
+                    try:
+                        self.lock_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"resource lock is held by a live owner: {self.lock_path}"
+                    )
                 time.sleep(0.005)
-        try: yield
+        try:
+            yield
         finally:
-            try: self.lock_path.unlink()
-            except FileNotFoundError: pass
+            try:
+                record = json.loads(self.lock_path.read_text(encoding="utf-8"))
+                if int(record.get("pid", -1)) == os.getpid():
+                    self.lock_path.unlink()
+            except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+                pass
 
     @contextmanager
     def locked_snapshot(self, target_id: str):
