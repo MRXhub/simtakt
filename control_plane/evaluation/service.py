@@ -1,11 +1,11 @@
 """Simulator-neutral coordination API for scientific evaluations."""
 
-from __future__ import annotations
-
 import hashlib
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 from control_plane.core.ports import ControlStore
 from control_plane.evaluation.project_ports import ProjectFileControlStore
@@ -47,6 +47,9 @@ from control_plane.simulation.session_contracts import (
     normalize_artifact_id,
     validate_simulation_session_result,
 )
+from control_plane.simulation.adapter_catalog import AdapterCatalogError, resolve_adapter
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class EvaluationMiddleware:
@@ -806,7 +809,7 @@ class EvaluationMiddleware:
         )
         if normalized["status"] == "completed":
             observation = self._terminal_feedback(feedback=feedback, success=True)
-            return self._repository.complete_attempt(
+            completed = self._repository.complete_attempt(
                 normalized["attempt_id"],
                 worker_id,
                 artifacts,
@@ -814,6 +817,10 @@ class EvaluationMiddleware:
                 _validated_session_result=True,
                 feedback=observation,
             )
+            self._qualify_completed_attempt(
+                normalized["attempt_id"], tuple(artifacts), completed
+            )
+            return completed
         if normalized["status"] == "exhausted":
             observation = self._terminal_feedback(feedback=feedback, success=False)
             return self._repository.fail_attempt(
@@ -833,6 +840,48 @@ class EvaluationMiddleware:
             reason="proxy-session-indeterminate",
             now=now,
         )
+
+    def _qualify_completed_attempt(
+        self,
+        attempt_id: str,
+        collected_artifact_ids: Sequence[str],
+        completed: Mapping[str, Any],
+    ) -> None:
+        """Best-effort adapter qualification after an Attempt completes."""
+        if not isinstance(completed, Mapping) or completed.get("status") != "qualifying":
+            return
+        if self._project_root is None:
+            _LOGGER.info("qualification skipped: no project adapter root configured")
+            return
+        try:
+            attempt = self._repository.get_attempt(attempt_id)
+            evaluation_input = self._repository.get_evaluation_input(attempt["evaluation_id"])
+            candidate = evaluation_input["candidate"]
+            attempts = self._repository.list_evaluation_attempts(attempt["evaluation_id"])
+            artifact_ids = tuple(sorted({
+                artifact_id
+                for item in attempts
+                for artifact_id in item.get("artifact_ids", ())
+                if isinstance(artifact_id, str)
+            } | set(collected_artifact_ids)))
+            context = MappingProxyType({
+                "evaluation_id": str(attempt["evaluation_id"]),
+                "candidate_id": str(candidate["candidate_id"]),
+                "attempt_ids": tuple(str(item["attempt_id"]) for item in attempts),
+                "artifact_ids": artifact_ids,
+            })
+            resolved = resolve_adapter(self._project_root, str(attempt["simulation_adapter"]))
+            report = resolved.adapter.qualify(self, attempt_id, context)
+            if not isinstance(report, Mapping):
+                raise ContractError("adapter qualification report must be an object")
+            self.record_qualification(report)
+        except Exception as exc:
+            # Qualification is accessory to scheduling; retain qualifying and
+            # expose failures without persisting an invalid report.
+            _LOGGER.warning(
+                "adapter qualification unavailable/failed for attempt %s: %s",
+                attempt_id, exc, exc_info=True
+            )
 
     def _terminal_feedback(
         self,
