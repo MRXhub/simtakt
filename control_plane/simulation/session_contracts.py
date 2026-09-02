@@ -131,10 +131,10 @@ def make_simulation_session_plan(
     recovery_profile_revision: str,
     base_package_artifact_id: str,
     base_package_revision: str,
-    task_id: str,
     target_id: str,
-    authorization_id: str,
-    authorization_revision: str,
+    task_id: str | None = None,
+    authorization_id: str | None = None,
+    authorization_revision: str | None = None,
     requested_processors: int,
     command_timeout_seconds: int,
     max_solver_runs: int,
@@ -145,6 +145,13 @@ def make_simulation_session_plan(
     candidate = str(candidate_id).strip().lower()
     if not re.fullmatch(r"candidate:sha256:[0-9a-f]{64}", candidate):
         raise ContractError("candidate_id must be a content-addressed Candidate identity")
+    authorization = (
+        None
+        if authorization_id is None and authorization_revision is None
+        else _artifact_ref(authorization_id, authorization_revision, "authorization")
+    )
+    if (authorization_id is None) != (authorization_revision is None):
+        raise ContractError("authorization artifact_id and revision must be supplied together")
     body = {
         "contract_version": SESSION_CONTRACT_VERSION,
         "attempt_id": _identity(attempt_id, "attempt", "attempt_id"),
@@ -157,11 +164,9 @@ def make_simulation_session_plan(
         "base_package": _artifact_ref(
             base_package_artifact_id, base_package_revision, "base_package"
         ),
-        "task_id": _text(task_id, "task_id"),
+        "task_id": None if task_id is None else _text(task_id, "task_id"),
         "target_id": _text(target_id, "target_id"),
-        "authorization": _artifact_ref(
-            authorization_id, authorization_revision, "authorization"
-        ),
+        "authorization": authorization,
         "resources": {
             "requested_processors": _positive_integer(
                 requested_processors, "requested_processors"
@@ -181,7 +186,9 @@ def make_simulation_session_plan(
 def validate_simulation_session_plan(value: Any) -> dict[str, Any]:
     source = _object(value, "SimulationSessionPlan")
     base_package = _object(source.get("base_package"), "base_package")
-    authorization = _object(source.get("authorization"), "authorization")
+    authorization = source.get("authorization")
+    if authorization is not None and not isinstance(authorization, Mapping):
+        raise ContractError("authorization must be an object or null")
     resources = _object(source.get("resources"), "resources")
     budget = _object(source.get("budget"), "budget")
     expected = make_simulation_session_plan(
@@ -194,8 +201,8 @@ def validate_simulation_session_plan(value: Any) -> dict[str, Any]:
         base_package_revision=base_package.get("revision"),
         task_id=source.get("task_id"),
         target_id=source.get("target_id"),
-        authorization_id=authorization.get("artifact_id"),
-        authorization_revision=authorization.get("revision"),
+        authorization_id=None if authorization is None else authorization.get("artifact_id"),
+        authorization_revision=None if authorization is None else authorization.get("revision"),
         requested_processors=resources.get("requested_processors"),
         command_timeout_seconds=budget.get("command_timeout_seconds"),
         max_solver_runs=budget.get("max_solver_runs"),

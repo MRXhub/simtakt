@@ -75,8 +75,18 @@ class PreparationPhase:
                 prep = self._make(item)
                 self.repository.commit_preparation_claim(item["claim_id"], self.controller_id, prep)
                 count += 1
-            except OSError as exc:
-                _LOG.warning("preparation skipped for %s: %s", item.get("evaluation_id"), exc)
-                self.repository.release_preparation_claim(item["claim_id"], self.controller_id, reason=f"preparation-failed: {exc}")
-                self.repository.mark_unresolved(str(item["evaluation_id"]), reason=f"preparation-failed: {exc}")
+            except Exception as exc:
+                # Preparation failures are per-evaluation; one malformed or
+                # unavailable input must not abort the runtime round while
+                # leaving its claim leased indefinitely.
+                reason = f"preparation-failed: {type(exc).__name__}: {exc}"
+                _LOG.warning(
+                    "preparation skipped evaluation_id=%s reason=%s",
+                    item.get("evaluation_id"),
+                    reason,
+                )
+                self.repository.release_preparation_claim(
+                    item["claim_id"], self.controller_id, reason=reason
+                )
+                self.repository.mark_unresolved(str(item["evaluation_id"]), reason=reason)
         return count

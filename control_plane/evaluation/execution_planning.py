@@ -32,24 +32,6 @@ def materialize_session_plan(
             "selected execution option is not part of the preparation"
         )
     package = normalized_option["runnable_package"]
-    authorization = normalized_preparation["authorization"]
-    authorizations = normalized_preparation.get("authorizations")
-    if authorizations is not None:
-        if not isinstance(authorizations, list):
-            raise ExecutionOptionError(
-                "execution preparation authorization lineage is invalid"
-            )
-        matches = [
-            item
-            for item in authorizations
-            if isinstance(item, Mapping)
-            and item.get("target_id") == normalized_option["target_id"]
-        ]
-        if len(matches) != 1:
-            raise ExecutionOptionError(
-                "selected execution option has no unique authorization"
-            )
-        authorization = matches[0]
     budget = normalized_preparation["budget"]
     return make_simulation_session_plan(
         attempt_id=attempt_id,
@@ -61,10 +43,7 @@ def materialize_session_plan(
         ],
         base_package_artifact_id=package["artifact_id"],
         base_package_revision=package["revision"],
-        task_id=normalized_preparation["task_id"],
         target_id=normalized_option["target_id"],
-        authorization_id=authorization["artifact_id"],
-        authorization_revision=authorization["revision"],
         requested_processors=normalized_option["processors"],
         command_timeout_seconds=budget["command_timeout_seconds"],
         max_solver_runs=budget["max_solver_runs"],
