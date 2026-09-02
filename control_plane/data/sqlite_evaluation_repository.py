@@ -850,6 +850,44 @@ class SQLiteEvaluationRepository:
         normalized = validate_problem_definition(definition)
         definition_json = canonical_json(normalized)
         with self._transaction() as connection:
+            schema_row = connection.execute(
+                "SELECT canonical_json FROM schema_documents WHERE revision = ?",
+                (normalized["parameter_schema_revision"],),
+            ).fetchone()
+            if schema_row is None:
+                raise RepositoryError(
+                    "ProblemDefinition parameter_schema_revision is not registered"
+                )
+            try:
+                schema_document = json.loads(str(schema_row["canonical_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RepositoryError(
+                    "ProblemDefinition parameter schema document is not valid JSON"
+                ) from exc
+            if not isinstance(schema_document, Mapping):
+                raise RepositoryError(
+                    "ProblemDefinition parameter schema document must be an object"
+                )
+            source_package = schema_document.get("source_package")
+            if source_package is None:
+                raise RepositoryError(
+                    "ProblemDefinition parameter schema source_package is required"
+                )
+            if not isinstance(source_package, Mapping) or set(source_package) != {
+                "artifact_id",
+                "revision",
+            }:
+                raise RepositoryError(
+                    "ProblemDefinition parameter schema source_package is not parseable"
+                )
+            if not isinstance(source_package.get("artifact_id"), str) or not str(
+                source_package.get("artifact_id")
+            ).strip() or not _SHA256_REVISION.fullmatch(
+                str(source_package.get("revision", "")).strip().lower()
+            ):
+                raise RepositoryError(
+                    "ProblemDefinition parameter schema source_package is not parseable"
+                )
             existing = connection.execute(
                 """
                 SELECT definition_json, status FROM problem_definitions
