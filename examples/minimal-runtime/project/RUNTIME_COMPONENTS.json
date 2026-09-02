@@ -2,13 +2,6 @@
   "schema_version": 1,
   "components": [
     {
-      "name": "simulation_adapter",
-      "module": "examples.minimal-runtime.minimal_components",
-      "factory": "simulation_adapter_factory",
-      "interface_version": 1,
-      "config": {"adapter_id": "minimal-simulation"}
-    },
-    {
       "name": "worker",
       "module": "examples.minimal-runtime.minimal_components",
       "factory": "worker_factory",

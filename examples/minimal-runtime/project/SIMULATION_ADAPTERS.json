@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "catalog_id": "simulation-adapters",
+  "adapters": [
+    {
+      "adapter_id": "minimal-simulation",
+      "status": "active",
+      "module": "examples.minimal-runtime.minimal_components",
+      "factory": "simulation_adapter_factory",
+      "interface_version": 1,
+      "config": {
+        "package_dir": "examples/minimal-runtime/.runtime/packages"
+      }
+    }
+  ]
+}
