@@ -34,8 +34,9 @@ def main(argv=None):
     while worker.observe_session("demo-session") != "completed":
         pass
     result, artifact = worker.collect_session("demo-session")
+    duration = server.sessions["demo-session"].solve_elapsed_seconds
     worker.terminate_session("demo-session")
-    print(f"server session completed: {result['status']}; artifact={artifact}; licenses={server.license_count}")
+    print(f"server session completed: {result['status']}; measured_wall_seconds={duration}; artifact={artifact}; licenses={server.license_count}")
     return 0
 
 if __name__ == "__main__":

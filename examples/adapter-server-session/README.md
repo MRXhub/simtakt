@@ -35,6 +35,16 @@ The exact switches and behavior are version/platform dependent; consult the
 server's documentation for the installed COMSOL version. Batch is a separate
 example shape: a bounded process/job receipt, not a live connection + token
 session, and is intentionally not implemented here.
+ 
+## Measured solve duration
+
+`FakeServer.export()` returns a structured `solve.elapsed_seconds` field, and
+`session_adapter.py` parses that field into `SolverRunRecord.wall_seconds`.
+The field represents the solver's own operation (COMSOL solve-time is the
+reference semantic), not connection, polling, or session lifetime. Add the
+real software response/log mapping at `# TODO(adapter):`; if the field is
+missing or invalid, the adapter reports `wall_seconds=None` rather than
+approximating with attempt lifetime.
 
 Run the self-contained demo with:
 

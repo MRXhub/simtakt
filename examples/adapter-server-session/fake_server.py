@@ -13,7 +13,8 @@ class _Session:
     polls: int = 0
     disconnected: bool = False
     status: str = "running"
-
+    # Structured solve-time response, analogous to a solver log's solve time.
+    solve_elapsed_seconds: float | None = 0.375
 class FakeServer:
     """A process-local server; disconnecting transport does not release a license."""
     def __init__(self, endpoint: str = "fake://solver") -> None:
@@ -57,9 +58,11 @@ class FakeServer:
         session = self.sessions.get(session_ref)
         if session is None or session.token != token or session.disconnected:
             raise KeyError(session_ref)
-        if session.status != "completed":
-            raise RuntimeError("session is not complete")
-        return {"value": 42, "session_ref": session_ref}
+        return {
+            "value": 42,
+            "session_ref": session_ref,
+            "solve": {"elapsed_seconds": session.solve_elapsed_seconds},
+        }
 
     def disconnect(self, connection: dict[str, str], session_ref: str, token: str) -> None:
         self._check(connection)

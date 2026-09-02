@@ -81,6 +81,17 @@ class ServerSessionWorker:
         if self.observe_session(ref) != "completed":
             raise RuntimeError("session is not completed or reachable")
         exported = self.server.export(self._connections[ref], ref, self._refs[ref][1])
+        # The service's structured solve field is the solve operation duration,
+        # analogous to COMSOL's solve-time log entry, not session lifetime.
+        try:
+            raw_duration = exported["solve"]["elapsed_seconds"]
+            duration = float(raw_duration) if raw_duration is not None and float(raw_duration) >= 0 else None
+        except (KeyError, TypeError, ValueError):
+            duration = None
+        # TODO(adapter): map the real solver's log/response solve-time field here.
+        if duration is None:
+            # Missing server solve time is reported as None, never approximated.
+            duration = None
         plan = self._plans[ref]
         run_id = str(self._allocations[ref].get("run_id", "server-run"))
         run = make_solver_run_record(
@@ -89,7 +100,7 @@ class ServerSessionWorker:
             package_revision=plan["base_package"]["revision"],
             numerical_profile_revision=plan["recovery_profile_revision"],
             action="server-session", status="completed", exit_code=0,
-            artifact_ids=(artifact_id(exported),),
+            artifact_ids=(artifact_id(exported),), wall_seconds=duration,
         )
         result = make_simulation_session_result(
             plan_id=plan["plan_id"], attempt_id=plan["attempt_id"], session_ref=ref,
