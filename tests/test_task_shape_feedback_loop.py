@@ -47,9 +47,11 @@ class TaskShapeFeedbackLoopTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.database = Path(self.temp.name) / "control.sqlite3"
         self.repo = SQLiteEvaluationRepository(self.database)
+        from tests.shared_fixtures import register_fixture_schema
+        schema_revision = register_fixture_schema(self.repo, problem_hint="feedback-loop")
         self.problem = make_problem_definition(
             problem_id="feedback-loop-fixture",
-            parameter_schema_revision=REVISION,
+            parameter_schema_revision=schema_revision,
             constraint_revision=REVISION,
             simulation_capabilities=["full-tcad"],
             metric_schema_revision=REVISION,

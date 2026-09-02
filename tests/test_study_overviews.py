@@ -39,8 +39,10 @@ class StudyOverviewTests(unittest.TestCase):
         self.middleware = EvaluationMiddleware(
             SQLiteEvaluationRepository(Path(self.tmp.name) / "control.sqlite3")
         )
+        from tests.shared_fixtures import register_fixture_schema
+        schema_revision = register_fixture_schema(self.middleware, problem_hint="overview")
         problem = make_problem_definition(
-            problem_id="overview-problem", parameter_schema_revision=REV_A,
+            problem_id="overview-problem", parameter_schema_revision=schema_revision,
             constraint_revision=REV_B, simulation_capabilities=["simulation"],
             metric_schema_revision=REV_C,
         )

@@ -129,9 +129,11 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
         self.scheduling_policy = resolve_governed_scheduling_policy(self.root)
         self.database = resolve_control_plane_database(self.root)
         self.middleware = EvaluationMiddleware.for_project(self.root)
+        from tests.shared_fixtures import register_fixture_schema
+        schema_revision = register_fixture_schema(self.middleware, problem_hint="prepared-dispatch")
         problem = make_problem_definition(
             problem_id="prepared-dispatch-fixture",
-            parameter_schema_revision=REVISION,
+            parameter_schema_revision=schema_revision,
             constraint_revision=REVISION,
             simulation_capabilities=["full-tcad"],
             metric_schema_revision=REVISION,

@@ -586,6 +586,10 @@ class RealRepositoryListEndpointsTests(unittest.TestCase):
         schema_dict = {
             "kind": "parameter-schema",
             "problem_hint": "ten-junction-thickness",
+            "source_package": {
+                "artifact_id": "package.thickness-vector.v1",
+                "revision": "sha256:" + "a" * 64,
+            },
             "parameters": [
                 {
                     "name": "t_total1",

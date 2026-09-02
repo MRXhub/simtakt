@@ -29,9 +29,11 @@ class StudyRegistryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.database = Path(self.tmp.name) / "control.sqlite3"
         self.middleware = EvaluationMiddleware(SQLiteEvaluationRepository(self.database))
+        from tests.shared_fixtures import register_fixture_schema
+        schema_revision = register_fixture_schema(self.middleware, problem_hint="study")
         self.problem = make_problem_definition(
             problem_id="study-problem",
-            parameter_schema_revision=REV_A,
+            parameter_schema_revision=schema_revision,
             constraint_revision=REV_B,
             simulation_capabilities=["simulation"],
             metric_schema_revision=REV_C,

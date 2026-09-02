@@ -138,6 +138,13 @@ def load_catalog(project_root: Path | str) -> list[Mapping[str, Any]]:
             raise _catalog_error(
                 f"{entry_path}.resource_defaults", "expected object", adapter_id
             )
+        required_resources = {"processors", "memory_bytes", "max_wall_seconds"}
+        if not required_resources.issubset(resource_defaults):
+            raise _catalog_error(
+                f"{entry_path}.resource_defaults",
+                "required processors, memory_bytes, and max_wall_seconds",
+                adapter_id,
+            )
         for resource, value in resource_defaults.items():
             if (
                 not isinstance(resource, str)
@@ -152,7 +159,6 @@ def load_catalog(project_root: Path | str) -> list[Mapping[str, Any]]:
                     "values must be finite non-negative numbers",
                     adapter_id,
                 )
-        result.append(entry)
     return result
 
 

@@ -10,8 +10,9 @@
       "interface_version": 1,
       "capabilities": ["minimal-simulation"],
       "resource_defaults": {
-        "cpu": 1,
-        "memory_bytes": 0
+        "processors": 1,
+        "memory_bytes": 0,
+        "max_wall_seconds": 0
       },
       "config": {
         "package_dir": "examples/minimal-runtime/.runtime/packages"
