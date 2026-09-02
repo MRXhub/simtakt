@@ -797,7 +797,13 @@ class EvaluationMiddleware:
         feedback: Mapping[str, Any] | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        normalized = validate_simulation_session_result(result)
+        raw_records = result.get("solver_run_records") if isinstance(result, Mapping) else None
+        validation_result = (
+            {key: value for key, value in result.items() if key != "solver_run_records"}
+            if isinstance(raw_records, Sequence) and not isinstance(raw_records, (str, bytes))
+            else result
+        )
+        normalized = validate_simulation_session_result(validation_result)
         attempt = self._repository.get_attempt(normalized["attempt_id"])
         if (
             attempt["execution_plan_id"] != normalized["plan_id"]
@@ -811,8 +817,36 @@ class EvaluationMiddleware:
                 *normalized["evidence_artifact_ids"],
             }
         )
+        derived: dict[str, Any] = {}
+        if (
+            isinstance(raw_records, Sequence)
+            and not isinstance(raw_records, (str, bytes))
+            and raw_records
+        ):
+            for output_key, record_key in (
+                ("wall_seconds", "wall_seconds"),
+                ("cpu_seconds", "cpu_seconds"),
+                ("rss_bytes", "peak_rss_bytes"),
+            ):
+                values = [
+                    item.get(record_key) for item in raw_records
+                    if isinstance(item, Mapping)
+                ]
+                if len(values) == len(raw_records) and all(
+                    value is not None for value in values
+                ):
+                    derived[output_key] = (
+                        max(values) if output_key == "rss_bytes" else sum(values)
+                    )
+        merged_feedback = dict(derived)
+        if isinstance(feedback, Mapping):
+            merged_feedback.update(
+                {key: value for key, value in feedback.items() if value is not None}
+            )
         if normalized["status"] == "completed":
-            observation = self._terminal_feedback(feedback=feedback, success=True)
+            observation = self._terminal_feedback(
+                feedback=merged_feedback or feedback, success=True
+            )
             completed = self._repository.complete_attempt(
                 normalized["attempt_id"],
                 worker_id,
@@ -826,7 +860,9 @@ class EvaluationMiddleware:
             )
             return completed
         if normalized["status"] == "exhausted":
-            observation = self._terminal_feedback(feedback=feedback, success=False)
+            observation = self._terminal_feedback(
+                feedback=merged_feedback or feedback, success=False
+            )
             return self._repository.fail_attempt(
                 normalized["attempt_id"],
                 worker_id,
