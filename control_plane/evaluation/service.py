@@ -856,12 +856,18 @@ class EvaluationMiddleware:
         completed: Mapping[str, Any],
     ) -> None:
         """Qualify a completed attempt, marking its Evaluation unresolved on failure."""
-        if not isinstance(completed, Mapping) or completed.get("status") != "qualifying":
+        if not isinstance(completed, Mapping):
+            return
+        if self._project_root is None:
+            raise AdapterCatalogError("adapter root is not configured")
+        attempt = self._repository.get_attempt(attempt_id)
+        evaluation = self._repository.get_evaluation(attempt["evaluation_id"])
+        # Qualification is driven by the Evaluation, which `complete_attempt`
+        # transitions to ``qualifying``; the returned Attempt record itself is
+        # ``completed`` and is not a signal to skip qualification.
+        if evaluation.get("status") != "qualifying":
             return
         try:
-            if self._project_root is None:
-                raise AdapterCatalogError("adapter root is not configured")
-            attempt = self._repository.get_attempt(attempt_id)
             evaluation_input = self._repository.get_evaluation_input(attempt["evaluation_id"])
             candidate = evaluation_input["candidate"]
             attempts = self._repository.list_evaluation_attempts(attempt["evaluation_id"])
@@ -892,6 +898,7 @@ class EvaluationMiddleware:
             )
             attempt = self._repository.get_attempt(attempt_id)
             self.mark_unresolved(str(attempt["evaluation_id"]), reason)
+
 
     def _terminal_feedback(
         self,

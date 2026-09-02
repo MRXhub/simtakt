@@ -15,6 +15,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from control_plane.core.evaluation_contracts import make_qualification_report
+from control_plane.simulation.session_contracts import (
+    make_simulation_session_result,
+    make_solver_run_record,
+)
+
+
 class FixedQuotaResourceMonitor:
     def __init__(self, entry: Mapping[str, Any]):
         cfg = entry.get("config", {})
@@ -131,11 +138,23 @@ class FixedQuotaResourceMonitor:
         path.write_text(json.dumps(payload, sort_keys=True, default=str), encoding="utf-8")
         return artifact_id, path
 
+
 class MinimalWorker:
     def __init__(self, entry: Mapping[str, Any]):
         self.sessions: dict[str, str] = {}
+        self.plans: dict[str, Mapping[str, Any]] = {}
         self.delay = float(entry.get("config", {}).get("delay_seconds", 0.001))
         self.adapter = MinimalSimulationAdapter({"config": {}})
+
+    def _package(self, plan: Mapping[str, Any]) -> Mapping[str, Any]:
+        base = plan.get("base_package")
+        if isinstance(base, Mapping):
+            return base
+        materialized = self.adapter.materialize_package(
+            {"candidate_id": plan.get("candidate_id")},
+            {"candidate_id": plan.get("candidate_id")},
+        )
+        return materialized
 
     def start_session(self, plan: Mapping[str, Any], allocation: Mapping[str, Any], session_ref: str) -> None:
         if session_ref in self.sessions:
@@ -145,16 +164,65 @@ class MinimalWorker:
         # so no drive-root or host path is ever created.
         template = plan.get("template", {"candidate_id": plan.get("candidate_id")})
         parameters = plan.get("candidate_parameters", {})
-        self.adapter.materialize_package(template if isinstance(template, Mapping) else {}, parameters if isinstance(parameters, Mapping) else {})
+        self.adapter.materialize_package(
+            template if isinstance(template, Mapping) else {},
+            parameters if isinstance(parameters, Mapping) else {},
+        )
+        self.plans[session_ref] = dict(plan)
         self.sessions[session_ref] = "completed"
         if self.delay:
             time.sleep(self.delay)
+
     def resume_session(self, plan: Mapping[str, Any], allocation: Mapping[str, Any], session_ref: str) -> None:
         self.sessions.setdefault(session_ref, "running")
-    def observe_session(self, session_ref: str) -> str: return self.sessions.get(session_ref, "absent")
+
+    def observe_session(self, session_ref: str) -> str:
+        return self.sessions.get(session_ref, "absent")
+
     def collect_session(self, session_ref: str) -> tuple[Mapping[str, Any], str]:
-        self.sessions[session_ref] = "completed"; return {"session_ref": session_ref, "status": "completed"}, "completed"
-    def terminate_session(self, session_ref: str) -> str: self.sessions[session_ref] = "terminated"; return "terminated"
+        plan = self.plans.get(session_ref, {})
+        package = self._package(plan)
+        package_artifact_id = str(package.get("artifact_id") or "package.minimal.input")
+        package_revision = str(package.get("revision") or "sha256:" + "0" * 64)
+        plan_id = str(plan.get("plan_id") or "")
+        attempt_id = str(plan.get("attempt_id") or "")
+        recovery = str(
+            plan.get("recovery_profile_revision")
+            or package_revision
+        )
+        artifact_id = "minimal-runtime." + uuid.uuid4().hex
+        if not plan_id or not attempt_id:
+            # The dispatcher always binds a SessionPlan before collect; if it
+            # does not, surface a clear contract error instead of a fake id.
+            raise ValueError("collect_session requires a bound SessionPlan")
+        run = make_solver_run_record(
+            plan_id=plan_id,
+            sequence=1,
+            run_id=session_ref,
+            package_artifact_id=package_artifact_id,
+            package_revision=package_revision,
+            numerical_profile_revision=recovery,
+            action="initial",
+            status="completed",
+            exit_code=0,
+            artifact_ids=[artifact_id],
+        )
+        result = make_simulation_session_result(
+            plan_id=plan_id,
+            attempt_id=attempt_id,
+            session_ref=session_ref,
+            status="completed",
+            solver_run_record_ids=[run["record_id"]],
+            journal_artifact_id=artifact_id,
+            evidence_artifact_ids=[artifact_id],
+        )
+        self.sessions[session_ref] = "completed"
+        return result, artifact_id
+
+    def terminate_session(self, session_ref: str) -> str:
+        self.sessions[session_ref] = "terminated"
+        return "terminated"
+
 
 class _MinimalGateway:
     """Small gateway used only to make the adapter boundary executable."""
@@ -213,6 +281,9 @@ class MinimalSimulationAdapter:
         self.adapter_id = str(entry.get("adapter_id", "minimal-simulation"))
         cfg = entry.get("config", {})
         self.package_dir = Path(cfg.get("package_dir", "examples/minimal-runtime/.runtime/packages")).resolve()
+        self.qualifier_revision = "sha256:" + hashlib.sha256(
+            self.adapter_id.encode("utf-8")
+        ).hexdigest()
 
     def build_gateway(self, context: Mapping[str, Any]) -> _MinimalGateway:
         return _MinimalGateway()
@@ -241,11 +312,36 @@ class MinimalSimulationAdapter:
 
     def qualify(self, middleware: Any, attempt_id: str,
                 context: Mapping[str, Any]) -> Mapping[str, Any]:
-        return {"attempt_id": attempt_id, "status": "qualified"}
+        """Qualify one completed attempt against the problem metric schema.
+
+        The runtime-neutral fake reports a single generic finite metric so the
+        whole queued -> planned -> running -> qualifying -> qualified chain is
+        exercised through the real qualification contract.
+        # TODO(adapter): compute real metrics from the collected run artifacts.
+        """
+        evaluation_input = middleware.get_evaluation_input(
+            context["evaluation_id"]
+        )
+        problem = evaluation_input["problem"]
+        evidence = tuple(sorted(context["artifact_ids"]))
+        metrics = {"generic_figure_of_merit": 1.0}
+        return make_qualification_report(
+            evaluation_id=context["evaluation_id"],
+            candidate_id=context["candidate_id"],
+            attempt_ids=context["attempt_ids"],
+            status="qualified",
+            qualifier_revision=self.qualifier_revision,
+            metric_schema_revision=problem["metric_schema_revision"],
+            metrics=metrics,
+            evidence_artifact_ids=evidence,
+        )
 
 
 def simulation_adapter_factory(entry: Mapping[str, Any]) -> MinimalSimulationAdapter:
     return MinimalSimulationAdapter(entry)
 
-def resource_monitor_factory(entry: Mapping[str, Any]) -> FixedQuotaResourceMonitor: return FixedQuotaResourceMonitor(entry)
-def worker_factory(entry: Mapping[str, Any]) -> MinimalWorker: return MinimalWorker(entry)
+def resource_monitor_factory(entry: Mapping[str, Any]) -> FixedQuotaResourceMonitor:
+    return FixedQuotaResourceMonitor(entry)
+
+def worker_factory(entry: Mapping[str, Any]) -> MinimalWorker:
+    return MinimalWorker(entry)
