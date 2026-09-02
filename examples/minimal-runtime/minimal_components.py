@@ -5,7 +5,11 @@ CPU/memory, the site's scheduler (such as Slurm), and the approved license
 service. TODO(adapter): integrate authoritative site-specific APIs.
 """
 from __future__ import annotations
-import json, os, time, uuid
+import hashlib
+import json
+import os
+import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +69,97 @@ class MinimalWorker:
     def collect_session(self, session_ref: str) -> tuple[Mapping[str, Any], str]:
         self.sessions[session_ref] = "completed"; return {"session_ref": session_ref, "status": "completed"}, "completed"
     def terminate_session(self, session_ref: str) -> str: self.sessions[session_ref] = "terminated"; return "terminated"
+
+class _MinimalGateway:
+    """Small gateway used only to make the adapter boundary executable."""
+
+    launch_confirmation_kind = "minimal-runtime-launch"
+
+    def __init__(self) -> None:
+        self.registered: dict[str, tuple[Path, str]] = {}
+
+    def __call__(self, plan: Mapping[str, Any], allocation: Mapping[str, Any],
+                 session_ref: str, session_directory: Path) -> Mapping[str, Any]:
+        session_directory.mkdir(parents=True, exist_ok=True)
+        return {"session_ref": session_ref, "status": "completed"}
+
+    def observe(self, confirmation: Mapping[str, Any]) -> str:
+        return str(confirmation.get("status", "absent"))
+
+    def recover_launch(self, plan: Mapping[str, Any], allocation: Mapping[str, Any],
+                       session_ref: str, session_directory: Path) -> Mapping[str, Any] | None:
+        return None
+
+    def collect_runner_receipt(self, confirmation: Mapping[str, Any],
+                               plan: Mapping[str, Any]) -> Mapping[str, Any]:
+        return dict(confirmation)
+
+    def publish_run_artifact(self, confirmation: Mapping[str, Any],
+                             plan: Mapping[str, Any], receipt: Mapping[str, Any]) -> str:
+        return "runtime-run-" + uuid.uuid4().hex
+
+    def retry_action(self, plan: Mapping[str, Any], receipt: Mapping[str, Any],
+                     next_sequence: int) -> str | None:
+        return None
+
+    def start_retry(self, plan: Mapping[str, Any], allocation: Mapping[str, Any],
+                    session_ref: str, session_directory: Path, *, run_id: str,
+                    sequence: int, action: str) -> Mapping[str, Any]:
+        return self(plan, allocation, session_ref, session_directory)
+
+    def recover_retry(self, plan: Mapping[str, Any], allocation: Mapping[str, Any],
+                      session_ref: str, session_directory: Path, *, run_id: str,
+                      sequence: int, action: str) -> Mapping[str, Any] | None:
+        return None
+
+    def register_artifact(self, artifact_id: str, path: Path, kind: str) -> None:
+        self.registered[str(artifact_id)] = (Path(path), str(kind))
+
+
+class MinimalSimulationAdapter:
+    """Neutral package materializer for the minimal-runtime example.
+
+    The bytes intentionally describe only generic input data.  A real adapter
+    should replace this payload with its own package format.
+    """
+
+    def __init__(self, entry: Mapping[str, Any]):
+        self.adapter_id = str(entry.get("adapter_id", "minimal-simulation"))
+        cfg = entry.get("config", {})
+        self.package_dir = Path(cfg.get("package_dir", "examples/minimal-runtime/.runtime/packages")).resolve()
+
+    def build_gateway(self, context: Mapping[str, Any]) -> _MinimalGateway:
+        return _MinimalGateway()
+
+    def materialize_package(self, evaluation_input: Mapping[str, Any],
+                            task: Mapping[str, Any]) -> dict[str, str]:
+        self.package_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "format": "minimal-runtime-neutral-input-v1",
+            "evaluation_input": dict(evaluation_input),
+            "task": dict(task),
+            "note": "Placeholder package bytes; no solver-specific deck syntax.",
+        }
+        raw = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        revision = "sha256:" + hashlib.sha256(raw).hexdigest()
+        artifact_id = self.adapter_id + ".package"
+        path = self.package_dir / (revision.removeprefix("sha256:") + ".pkg")
+        path.write_bytes(raw)
+        return {"artifact_id": artifact_id, "revision": revision, "path": str(path)}
+
+    def validate_package(self, context: Mapping[str, Any], task: Mapping[str, Any],
+                         preparation: Mapping[str, Any], package: Mapping[str, str]) -> None:
+        path = Path(package["path"])
+        if not path.is_file():
+            raise FileNotFoundError(path)
+
+    def qualify(self, middleware: Any, attempt_id: str,
+                context: Mapping[str, Any]) -> Mapping[str, Any]:
+        return {"attempt_id": attempt_id, "status": "qualified"}
+
+
+def simulation_adapter_factory(entry: Mapping[str, Any]) -> MinimalSimulationAdapter:
+    return MinimalSimulationAdapter(entry)
 
 def resource_monitor_factory(entry: Mapping[str, Any]) -> FixedQuotaResourceMonitor: return FixedQuotaResourceMonitor(entry)
 def worker_factory(entry: Mapping[str, Any]) -> MinimalWorker: return MinimalWorker(entry)
