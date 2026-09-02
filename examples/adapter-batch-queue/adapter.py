@@ -4,7 +4,7 @@ This is intentionally a fake scheduler adapter: no Slurm/LSF commands are run.
 """
 from __future__ import annotations
 import json
-from pathlib import Path
+import re
 from typing import Any, Mapping
 
 from control_plane.simulation.session_contracts import make_simulation_session_result, make_solver_run_record
@@ -15,6 +15,16 @@ except ImportError:  # direct execution from run_demo.py
     from fake_queue import FakeBatchQueue, QueueUnavailable
 
 BINDINGS_FILE = "batch-session-bindings.json"
+
+def _parse_elapsed(value: str | None) -> float | None:
+    """Parse sacct Elapsed semantics (DD-HH:MM:SS[.fraction])."""
+    if not value:
+        return None
+    match = re.fullmatch(r"(?:(\d+)-)?(\d+):(\d+):(\d+(?:\.\d+)?)", value.strip())
+    if not match:
+        return None
+    days, hours, minutes, seconds = match.groups()
+    return int(days or 0) * 86400 + int(hours) * 3600 + int(minutes) * 60 + float(seconds)
 
 class BatchQueueWorker:
     def __init__(self, queue: FakeBatchQueue | None = None) -> None:
@@ -131,8 +141,9 @@ class BatchQueueWorker:
             package_artifact_id=package["artifact_id"], package_revision=package["revision"],
             numerical_profile_revision=plan.get("recovery_profile_revision", "batch-profile"),
             action="initial", status="completed" if completed else "failed", exit_code=exit_code,
-            artifact_ids=[f"artifact.batch.{job_id}"] if completed else [])
-        # TODO(result extraction): parse solver output into SolverRunRecord and evidence
+            artifact_ids=[f"artifact.batch.{job_id}"] if completed else [],
+            wall_seconds=_parse_elapsed(history.elapsed))
+        # TODO(adapter): invoke sacct and define its exact --format output for real Slurm.
         # artifacts. Wrong extraction can omit convergence evidence or expose stale data.
         result = make_simulation_session_result(plan_id=plan["plan_id"], attempt_id=plan["attempt_id"],
             session_ref=ref, status="completed" if completed else "indeterminate",

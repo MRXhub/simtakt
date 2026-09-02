@@ -114,6 +114,16 @@ them for your installed version.
 3. **Result extraction** — How should output files become `SolverRunRecord` and
    evidence artifacts? Wrong extraction can omit convergence evidence or return
    stale/incomplete data.
+ 
+## Measured solve duration
+
+The queue history record is the source of duration: `fake_queue.py` supplies an
+Elapsed-shaped accounting value (for example `00:00:00.250`), and `adapter.py`
+parses it into `SolverRunRecord.wall_seconds`. This is the Slurm `sacct Elapsed`
+reference semantic, not the submit-to-collect lifetime. In production, fill in
+the command and exact output format at the `# TODO(adapter):` marker. Missing
+or unparsable accounting yields `wall_seconds=None`; the adapter does not
+approximate it with attempt lifetime.
 
 Run the self-contained demonstration with:
 

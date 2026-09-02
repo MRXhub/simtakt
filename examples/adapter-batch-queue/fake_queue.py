@@ -12,7 +12,8 @@ class Job:
     payload: dict[str, Any]
     state: str = "RUNNING"
     exit_code: int | None = None
-
+    # Slurm sacct's Elapsed-like accounting value, populated only after completion.
+    elapsed: str | None = None
 class FakeBatchQueue:
     def __init__(self) -> None:
         self.active: dict[str, Job] = {}
@@ -53,11 +54,11 @@ class FakeBatchQueue:
             job.state, job.exit_code = "CANCELLED", 130
             self.history[job.job_id] = job
 
-    def complete(self, job_id: str, exit_code: int = 0) -> None:
+    def complete(self, job_id: str, exit_code: int = 0, elapsed: str = "00:00:00.250") -> None:
         job = self.active.pop(str(job_id), None)
         if job is None:
             raise KeyError(job_id)
-        job.state, job.exit_code = ("COMPLETED" if exit_code == 0 else "FAILED"), int(exit_code)
+        job.state, job.exit_code, job.elapsed = ("COMPLETED" if exit_code == 0 else "FAILED"), int(exit_code), elapsed
         self.history[job.job_id] = job
 
     def expire_history(self, job_id: str | None = None) -> None:

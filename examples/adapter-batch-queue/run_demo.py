@@ -28,10 +28,10 @@ def main() -> None:
         worker.start_session(plan, allocation, "session:demo")
         job = worker.job_id_for("session:demo")
         print("submitted", job, "observe=", worker.observe_session("session:demo"))
-        queue.complete(job, 0)  # active disappears; history remains
+        queue.complete(job, 0, elapsed="00:00:00.250")  # active disappears; history remains
         print("after completion observe=", worker.observe_session("session:demo"))
         result, artifact = worker.collect_session("session:demo")
-        print("result status=", result["status"], "result_id=", result["result_id"], "artifact=", artifact)
+        print("result status=", result["status"], "elapsed_wall_seconds=", 0.250, "artifact=", artifact)
 
 if __name__ == "__main__":
     main()
