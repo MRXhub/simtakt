@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import queue
 import re
@@ -173,7 +174,13 @@ def default_powershell_validator(
 
 
 class PackageLandingService:
-    """Manages idempotent package submissions, serial staging worker, and queries."""
+    """Manage package submissions and serial staging.
+
+    Job queue state is in memory and therefore unavailable after a restart.
+    Registration renames the destination first, then atomically replaces its
+    shard; interruption between those steps leaves an unreferenced destination,
+    which startup reports without deleting.
+    """
 
     def __init__(
         self,
@@ -191,7 +198,9 @@ class PackageLandingService:
                 self.project_root / DEFAULT_PACKAGES_REL_PATH
             ).resolve()
         self.packages_dir.mkdir(parents=True, exist_ok=True)
+        self._logger = logging.getLogger(__name__)
         self._cleanup_dangling_staging_dirs()
+        self._scan_artifact_consistency()
         self.validator = validator
         self._jobs: dict[str, PackageJob] = {}
         self._jobs_by_key: dict[tuple[str, str], str] = {}
@@ -215,6 +224,33 @@ class PackageLandingService:
                         pass
         except OSError:
             pass
+    def _scan_artifact_consistency(self) -> None:
+        """Warn about shard/destination mismatches without mutating either side."""
+        records = self.project_root / "records" / "artifacts"
+        if not records.is_dir():
+            return
+        referenced: set[str] = set()
+        for shard_file in records.glob("pkg_*.json"):
+            try:
+                data = json.loads(shard_file.read_text(encoding="utf-8"))
+                revisions = data["artifact"]["revisions"]
+                for item in revisions:
+                    path = item["locations"][0]["path"]
+                    referenced.add(str(path).replace("\\", "/"))
+            except Exception as exc:
+                self._logger.warning("artifact consistency: cannot parse %s: %s", shard_file, exc)
+        try:
+            destinations = [
+                self._rel_path(entry) for entry in self.packages_dir.iterdir()
+                if entry.is_dir() and not entry.name.startswith(".staging")
+            ]
+        except OSError as exc:
+            self._logger.warning("artifact consistency: cannot scan destinations: %s", exc)
+            return
+        for path in sorted(set(destinations) - referenced):
+            self._logger.warning("artifact consistency: destination exists but is not referenced by any shard: %s", path)
+        for path in sorted(referenced - set(destinations)):
+            self._logger.warning("artifact consistency: shard references missing destination: %s", path)
 
     def start(self) -> None:
         """Start the background serial worker thread."""
@@ -559,7 +595,10 @@ class PackageLandingService:
                     f"Package validation failed: {err_clean}"
                 )
 
-            # 3. Registering Step (Dest Protection: never overwrite existing dest)
+            # 3. Registering Step. Existing revisions are retained in separate
+            # immutable destination directories; never overwrite a package.
+            if dest_dir.exists():
+                dest_dir = self.packages_dir / f"{job.package_name}__{job.content_hash[7:15]}"
             if dest_dir.exists():
                 raise PackageLandingError(
                     f"destination directory already exists: {self._rel_path(dest_dir)}"
@@ -573,46 +612,65 @@ class PackageLandingService:
                     f"[{now_str}] [registering] Verification PASSED (0 errors). Performing atomic rename staging -> {self._rel_path(dest_dir)}..."
                 )
 
+            # Write order is destination rename first, then shard replacement:
+            # an interruption leaves an unreferenced destination (safe, discoverable
+            # by the startup scanner), whereas shard-first could reference missing data.
             staging_dir.replace(dest_dir)
             created_dest = True
 
-            # Optional: write artifact shard if records/artifacts exists
             records_artifacts = self.project_root / "records" / "artifacts"
             if records_artifacts.is_dir():
                 manifest_path = dest_dir / "manifest.json"
-                manifest_hash = (
-                    "sha256:"
-                    + hashlib.sha256(manifest_path.read_bytes()).hexdigest().lower()
-                )
-                shard_data = {
-                    "schema_version": 1,
-                    "record_kind": "artifact-catalog-shard",
-                    "artifact": {
-                        "artifact_id": f"pkg:{job.package_name}",
-                        "kind": "input-package",
-                        "status": "active",
-                        "latest_revision": manifest_hash,
-                        "revisions": [
-                            {
-                                "revision": manifest_hash,
-                                "hash_scope": "package-manifest",
-                                "locations": [
-                                    {
-                                        "storage": "workspace",
-                                        "role": "primary",
-                                        "availability": "current",
-                                        "path": self._rel_path(dest_dir),
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                }
+                manifest_hash = "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest().lower()
                 shard_file = records_artifacts / f"pkg_{job.package_name}.json"
-                created_shard_file = shard_file
-                shard_file.write_bytes(
-                    json.dumps(shard_data, indent=2).encode("utf-8") + b"\n"
-                )
+                shard_data: dict[str, Any]
+                matching = False
+                if shard_file.exists():
+                    try:
+                        shard_data = json.loads(shard_file.read_text(encoding="utf-8"))
+                    except Exception as exc:
+                        raise PackageLandingError(
+                            f"artifact shard is corrupted and cannot be parsed: {shard_file}: {exc}"
+                        ) from exc
+                    artifact = shard_data.get("artifact")
+                    if (
+                        shard_data.get("schema_version") != 1
+                        or shard_data.get("record_kind") != "artifact-catalog-shard"
+                        or not isinstance(artifact, dict)
+                        or artifact.get("artifact_id") != f"pkg:{job.package_name}"
+                        or artifact.get("kind") != "input-package"
+                        or artifact.get("status") != "active"
+                        or not isinstance(artifact.get("revisions"), list)
+                    ):
+                        raise PackageLandingError(f"artifact shard is invalid: {shard_file}")
+                    revisions = artifact["revisions"]
+                    matches = [r for r in revisions if isinstance(r, dict) and str(r.get("revision", "")).lower() == manifest_hash]
+                    if matches:
+                        matching = True
+                        old_path = self.project_root / str(matches[0]["locations"][0]["path"])
+                        shutil.rmtree(dest_dir, ignore_errors=True)
+                        created_dest = False
+                        dest_dir = old_path
+                    else:
+                        revisions.append({
+                            "revision": manifest_hash, "hash_scope": "package-manifest",
+                            "locations": [{"storage": "workspace", "role": "primary", "availability": "current", "path": self._rel_path(dest_dir)}],
+                        })
+                        artifact["latest_revision"] = manifest_hash
+                else:
+                    shard_data = {
+                        "schema_version": 1, "record_kind": "artifact-catalog-shard",
+                        "artifact": {
+                            "artifact_id": f"pkg:{job.package_name}", "kind": "input-package", "status": "active",
+                            "latest_revision": manifest_hash,
+                            "revisions": [{"revision": manifest_hash, "hash_scope": "package-manifest",
+                                           "locations": [{"storage": "workspace", "role": "primary", "availability": "current", "path": self._rel_path(dest_dir)}]}],
+                        },
+                    }
+                if not matching:
+                    tmp = shard_file.with_name(f".{shard_file.name}.{uuid.uuid4().hex}.tmp")
+                    tmp.write_bytes(json.dumps(shard_data, indent=2).encode("utf-8") + b"\n")
+                    os.replace(tmp, shard_file)
 
             # 4. Registered Terminal State
             with self._lock:
