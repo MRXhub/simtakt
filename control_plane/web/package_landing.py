@@ -398,6 +398,10 @@ class PackageLandingService:
         self, package_name: str, content_hash: str
     ) -> dict[str, Any] | None:
         """Check data/inputs/packages/<package_name> to see if it matches deck content hash."""
+        if not is_safe_package_name(package_name):
+            raise ContractError(
+                f"invalid or reserved package_name '{package_name}'"
+            )
         norm_hash = content_hash.strip().lower()
         pkg_dir = self.packages_dir / package_name
         if not pkg_dir.is_dir() or pkg_dir.name.startswith(".staging"):
@@ -442,7 +446,11 @@ class PackageLandingService:
             return None
 
         for entry in entries:
-            if not entry.is_dir() or entry.name.startswith(".staging"):
+            if (
+                not entry.is_dir()
+                or entry.name.startswith(".staging")
+                or not is_safe_package_name(entry.name)
+            ):
                 continue
             res = self.find_registered_package(entry.name, norm_hash)
             if res is not None:
