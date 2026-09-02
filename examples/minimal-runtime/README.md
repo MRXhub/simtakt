@@ -38,6 +38,18 @@ license-service adapters (TODO(adapter) marks the integration point), and
 update the policy capacity envelope to match. Update target declarations and
 regenerate the artifact revision according to your installed version.
 
+## Materializing a runnable package
+
+The assembly layer calls the resolved adapter's `materialize_package` method
+with the evaluation input and task; this operation is not performed inside the
+control plane. Adapters are explicitly registered in
+`project/SIMULATION_ADAPTERS.json` using the catalog's required fields.
+
+The resulting package identity is governed by a SHA-256 hash of its
+`manifest.json` (`hash_scope: "package-manifest"`), rather than by a hash of
+any one package file. The `run_materialize_demo.py` entry point demonstrates
+the complete materialize, register, and preparation-binding flow.
+
 The lock uses atomic exclusive file creation and is intentionally only a
 portable example; use the site's distributed allocation/locking authority for
 multiple hosts.
