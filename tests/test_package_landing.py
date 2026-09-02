@@ -17,6 +17,7 @@ from typing import Any
 from unittest.mock import patch
 
 from control_plane.core.workspace_artifacts import resolve_workspace_artifact
+from control_plane.core.evaluation_contracts import ContractError
 from control_plane.web.package_landing import (
     PackageLandingError,
     PackageLandingService,
@@ -108,7 +109,7 @@ class PackageLandingDirectUnitTests(unittest.TestCase):
             self.assertEqual(job["status"], "registered")
             self.assertIsNone(job["error"])
             self.assertIsNotNone(job["package"])
-            self.assertEqual(job["package"]["artifact_id"], "pkg:pkg-test-success")
+            self.assertEqual(job["package"]["artifact_id"], "pkg.pkg-test-success")
             self.assertEqual(job["package"]["revision"], content_hash)
 
             # Check log tail step-by-step
@@ -127,7 +128,7 @@ class PackageLandingDirectUnitTests(unittest.TestCase):
 
             manifest = json.loads(manifest_file.read_bytes().decode("utf-8"))
             self.assertEqual(manifest["schema_version"], 2)
-            self.assertEqual(manifest["artifact_id"], "pkg:pkg-test-success")
+            self.assertEqual(manifest["artifact_id"], "pkg.pkg-test-success")
             self.assertEqual(manifest["package_name"], "pkg-test-success")
             self.assertEqual(manifest["package_kind"], "input-package")
             self.assertEqual(manifest["deck_file"], "deck.in")
@@ -198,8 +199,8 @@ class PackageLandingDirectUnitTests(unittest.TestCase):
                 "deck_text": deck_content,
             })
             job = service.wait_job(res["job_id"], timeout=5.0)
-            self.assertEqual(job["status"], "failed")
-            self.assertIn("destination directory already exists", str(job["error"]))
+            self.assertEqual(job["status"], "registered")
+            self.assertIsNone(job["error"])
 
             # Assert existing dest content is 100% intact
             self.assertTrue(dest_dir.is_dir())
@@ -473,7 +474,7 @@ class PackageLandingDirectUnitTests(unittest.TestCase):
             found = service2.find_registered_package("pkg-persisted", content_hash)
             self.assertIsNotNone(found)
             self.assertEqual(found["package_name"], "pkg-persisted")
-            self.assertEqual(found["artifact_id"], "pkg:pkg-persisted")
+            self.assertEqual(found["artifact_id"], "pkg.pkg-persisted")
 
             # Submit again on clean service -> immediately recognizes registered package
             res2 = service2.submit_package({
@@ -486,7 +487,7 @@ class PackageLandingDirectUnitTests(unittest.TestCase):
             job2 = service2.get_job(res2["job_id"])
             self.assertIsNotNone(job2)
             self.assertEqual(job2["status"], "registered")
-            self.assertEqual(job2["package"]["artifact_id"], "pkg:pkg-persisted")
+            self.assertEqual(job2["package"]["artifact_id"], "pkg.pkg-persisted")
         finally:
             service2.close()
 
@@ -767,7 +768,7 @@ class PackageLandingHttpServerTests(unittest.TestCase):
         self.assertEqual(get_payload["job_id"], job_id)
         self.assertEqual(get_payload["package_name"], "pkg-http-test")
         self.assertEqual(get_payload["content_hash"], expected_hash)
-        self.assertEqual(get_payload["package"]["artifact_id"], "pkg:pkg-http-test")
+        self.assertEqual(get_payload["package"]["artifact_id"], "pkg.pkg-http-test")
         self.assertTrue(len(get_payload["log_tail"]) >= 4)
 
     def test_post_packages_invalid_name_or_traversal_returns_400(self) -> None:
