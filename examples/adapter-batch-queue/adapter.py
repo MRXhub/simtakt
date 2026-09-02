@@ -160,7 +160,8 @@ class BatchQueueWorker:
         # artifacts. Wrong extraction can omit convergence evidence or expose stale data.
         result = make_simulation_session_result(plan_id=plan["plan_id"], attempt_id=plan["attempt_id"],
             session_ref=ref, status="completed" if completed else "indeterminate",
-            solver_run_record_ids=[run["record_id"]], journal_artifact_id=f"artifact.batch.journal.{job_id}",
+            solver_run_record_ids=[run["record_id"]], solver_run_records=[run],
+            journal_artifact_id=f"artifact.batch.journal.{job_id}",
             evidence_artifact_ids=[f"artifact.batch.{job_id}"] if completed else [],
             terminal_cause=None if completed else "queue-nonzero-exit")
         return _ResultWithRunRecord(result, run), f"artifact.batch.{job_id}"

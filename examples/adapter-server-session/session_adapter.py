@@ -117,6 +117,7 @@ class ServerSessionWorker:
         result = make_simulation_session_result(
             plan_id=plan["plan_id"], attempt_id=plan["attempt_id"], session_ref=ref,
             status="completed", solver_run_record_ids=(run["record_id"],),
+            solver_run_records=(run,),
             journal_artifact_id=artifact_id({"journal": ref}),
             evidence_artifact_ids=(artifact_id(exported),),
         )

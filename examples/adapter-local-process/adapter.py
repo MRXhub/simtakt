@@ -183,7 +183,7 @@ class SimulationWorker:
         package = plan.get("base_package", {"artifact_id": "artifact.local-package", "revision": "sha256:" + "0" * 64})
         run = make_solver_run_record(plan_id=plan["plan_id"], sequence=1, run_id=ref, package_artifact_id=package["artifact_id"], package_revision=package["revision"], numerical_profile_revision=plan.get("recovery_profile_revision", "sha256:" + "0" * 64), action="initial", status="completed" if converged else "failed", exit_code=0 if converged or exhausted else code, artifact_ids=["artifact.local.result"] if converged else [], wall_seconds=timing_seconds)
         result_status = "completed" if converged else "exhausted" if exhausted else "indeterminate"
-        result = make_simulation_session_result(plan_id=plan["plan_id"], attempt_id=plan["attempt_id"], session_ref=ref, status=result_status, solver_run_record_ids=[run["record_id"]], journal_artifact_id="artifact.local.journal", evidence_artifact_ids=["artifact.local.result"] if converged else [], terminal_cause=None if converged else "solver-not-converged")
+        result = make_simulation_session_result(plan_id=plan["plan_id"], attempt_id=plan["attempt_id"], session_ref=ref, status=result_status, solver_run_record_ids=[run["record_id"]], solver_run_records=[run], journal_artifact_id="artifact.local.journal", evidence_artifact_ids=["artifact.local.result"] if converged else [], terminal_cause=None if converged else "solver-not-converged")
         return _ResultWithRunRecord(result, run), item["log_path"]
 
 
