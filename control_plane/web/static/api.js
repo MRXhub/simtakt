@@ -82,7 +82,7 @@ export const mockSchemas = {
     revision: "sha256:mock-schema-ten-junction-v1",
     problem_hint: "ten-junction-thickness-tcad",
     source_package: {
-      artifact_id: "pkg:ten-junction-tcad",
+      artifact_id: "pkg.ten-junction-tcad",
       revision: "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0"
     },
     parameters: [
@@ -107,7 +107,7 @@ export const mockSchemas = {
     revision: "sha256:mock-schema-cmos-inverter-v1",
     problem_hint: "cmos-inverter-delay-opt",
     source_package: {
-      artifact_id: "pkg:cmos-inverter-hspice",
+      artifact_id: "pkg.cmos-inverter-hspice",
       revision: "sha256:b2c3d4e5f6a708192a3b4c5d6e7f809123456789abcdef0123456789abcdef1"
     },
     parameters: [
@@ -129,7 +129,7 @@ export const mockSchemas = {
     revision: "sha256:mock-schema-spis-plasma-v1",
     problem_hint: "spis-plasma-charging",
     source_package: {
-      artifact_id: "pkg:spis-spacecraft-charging",
+      artifact_id: "pkg.spis-spacecraft-charging",
       revision: "sha256:c3d4e5f6a7b8091a2b3c4d5e6f70819223456789abcdef0123456789abcdef2"
     },
     parameters: [
@@ -390,14 +390,14 @@ function getMockPayload(path) {
       items: [
         {
           package_name: "pkg-solar-cell-tcad",
-          artifact_id: "pkg:ten-junction-tcad",
+          artifact_id: "pkg.ten-junction-tcad",
           revision: "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0",
           status: "registered",
           created_at: mIso(3 * DAY)
         },
         {
           package_name: "pkg-cmos-inverter",
-          artifact_id: "pkg:cmos-inverter-hspice",
+          artifact_id: "pkg.cmos-inverter-hspice",
           revision: "sha256:b2c3d4e5f6a708192a3b4c5d6e7f809123456789abcdef0123456789abcdef1",
           status: "registered",
           created_at: mIso(2 * DAY)
@@ -437,7 +437,7 @@ function getMockPayload(path) {
     const job = mockPackageJobs[jid] || {
       job_id: jid, status: "registered",
       logTail: ["[demo] Package job completed successfully."],
-      package: { artifact_id: "pkg:mock-package", revision: "sha256:mock-package-rev" },
+      package: { artifact_id: "pkg.mock-package", revision: "sha256:mock-package-rev" },
       error: null
     };
     return {
@@ -556,8 +556,8 @@ export async function postJSON(path, body) {
             package_name: pkgName,
             content_hash: contentHash,
             status: "registered",
-            logTail: [`[${fmtClockTime(new Date())}] [registered] Package recorded: pkg:${pkgName}`],
-            package: { artifact_id: "pkg:" + pkgName, revision: contentHash },
+            logTail: [`[${fmtClockTime(new Date())}] [registered] Package recorded: pkg.${pkgName}`],
+            package: { artifact_id: "pkg." + pkgName, revision: contentHash },
             error: null
           };
           resolve({ ok: true, status: 202, data: { job_id: jobId, content_hash: contentHash } });

@@ -466,7 +466,7 @@ export function renderPackagesView() {
 
     packages.forEach((pkg, idx) => {
       const pName = pkg.package_name || pkg.id || `pkg-item-${idx + 1}`;
-      const artId = pkg.artifact_id || `pkg:${pName}`;
+      const artId = pkg.artifact_id || `pkg.${pName}`;
       const rev = pkg.revision || "sha256:registered";
       const status = pkg.status || "registered";
       const isExpanded = !!state.expandedPackageManifests[pName];
