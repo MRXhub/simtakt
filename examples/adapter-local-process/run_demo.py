@@ -17,6 +17,7 @@ def run(mode):
     if mode=="tree":
         time.sleep(.4); child=int((root/"solver.child.pid").read_text()); out=w.terminate_session(ref); print(f"tree terminate={out}, child_alive={w._alive(child)}")
     else:
+        while w._procs[ref].poll() is None: time.sleep(.05)
         print(f"{mode} observe={w.observe_session(ref)}")
         timing = __import__("json").loads((root / "solver-timing.json").read_text())
         seconds = (timing["solve_finished_ns"] - timing["solve_started_ns"]) / 1_000_000_000
