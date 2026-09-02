@@ -737,6 +737,13 @@ def _validate_policy_derived_preparation(
         raise GovernedPreparationError(
             "execution option exceeds the SchedulingPolicy capacity envelope"
         )
+    _validate_options(
+        project_root,
+        {},
+        normalized,
+        [],
+        require_resource_neutral_package=True,
+    )
     return normalized, ""
 def attest_policy_derived_execution_preparation(
     project_root: Path | str,
@@ -776,7 +783,7 @@ def attest_policy_derived_execution_preparation(
         project_root=root,
         artifact_id=provenance["artifact_id"],
         artifact_revision=provenance["revision"],
-        project_state_revision=state_revision,
+        project_state_revision=provenance["project_state_revision"],
         _seal=_GOVERNANCE_SEAL,
     )
 

@@ -379,7 +379,7 @@ class PolicyDerivedPreparationTests(unittest.TestCase):
                 Path("."),
                 {"approved_packages": []},
                 preparation,
-                preparation["authorization"],
+                [],
                 require_resource_neutral_package=True,
             )
 
