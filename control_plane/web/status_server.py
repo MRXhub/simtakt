@@ -8,6 +8,8 @@ mutation endpoints backed by the shared EvaluationMiddleware.
 from __future__ import annotations
 
 import argparse
+import ipaddress
+
 import json
 import os
 import sys
@@ -634,15 +636,36 @@ class _HttpError(Exception):
         self.status = status
         self.message = message
 
+def _is_loopback_bind_host(host: str) -> bool:
+    """Return whether *host* is one of the explicitly safe loopback forms."""
+    normalized = host.strip().lower()
+    if normalized == "localhost":
+        return True
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return address.is_loopback
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--project-root", default=".")
     parser.add_argument("--allow-writes", action="store_true")
+    parser.add_argument("--allow-remote-writes", action="store_true",
+                        help="allow unauthenticated writes on a non-loopback bind")
     parser.add_argument("--demo", action="store_true",
                         help="run with an in-memory fixture (no project files)")
     args = parser.parse_args(argv)
+    if (args.allow_writes and not args.allow_remote_writes
+            and not _is_loopback_bind_host(args.host)):
+        print("写接口无认证,请绑定回环并经反向代理暴露;确需直接暴露加 --allow-remote-writes",
+              file=sys.stderr)
+        return 2
     demo = args.demo or os.environ.get("STATUS_SERVER_DEMO", "").lower() in {
         "1", "true", "yes", "on"
     }

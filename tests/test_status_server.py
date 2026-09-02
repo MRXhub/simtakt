@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
+
 import json
 import tempfile
 import threading
@@ -21,7 +24,43 @@ from control_plane.core.evaluation_contracts import (
 )
 from control_plane.data.sqlite_evaluation_repository import RepositoryError
 from control_plane.web import status_server
+
 from control_plane.web.status_server import StatusRequestHandler, StatusServer
+
+
+class MainArgumentTests(unittest.TestCase):
+    def test_remote_writes_are_rejected_before_server_start(self) -> None:
+        stderr = io.StringIO()
+        with patch.object(status_server, "StatusServer") as server:
+            with contextlib.redirect_stderr(stderr):
+                result = status_server.main([
+                    "--host", "0.0.0.0", "--allow-writes",
+                ])
+        self.assertEqual(result, 2)
+        server.assert_not_called()
+        self.assertEqual(
+            stderr.getvalue(),
+            "写接口无认证,请绑定回环并经反向代理暴露;确需直接暴露加 --allow-remote-writes\n",
+        )
+
+    def test_allow_remote_writes_flag_permits_start_without_listening(self) -> None:
+        fake_server = Mock()
+        fake_server.server_address = ("0.0.0.0", 8321)
+        fake_server.serve_forever.side_effect = KeyboardInterrupt
+        stderr = io.StringIO()
+        with patch.object(status_server, "StatusServer", return_value=fake_server), \
+                patch.object(status_server.EvaluationMiddleware, "for_project",
+                             return_value=Mock()):
+            with contextlib.redirect_stderr(stderr):
+                result = status_server.main([
+                    "--host", "0.0.0.0", "--allow-writes",
+                    "--allow-remote-writes",
+                ])
+        self.assertEqual(result, 0)
+        fake_server.serve_forever.assert_called_once_with()
+        fake_server.server_close.assert_called_once_with()
+
+
 
 
 class StatusServerTests(unittest.TestCase):
