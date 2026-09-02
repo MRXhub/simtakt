@@ -25,7 +25,7 @@ class MinimalRuntimeExampleTests(unittest.TestCase):
             capture_output=True, text=True, timeout=15,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("runtime rounds: 3", result.stdout)
+        self.assertIn("evaluation terminal status: qualified", result.stdout)
         self.assertFalse((EXAMPLE / ".runtime").exists())
 
     def test_receipt_is_readable(self):
@@ -48,4 +48,5 @@ class MinimalRuntimeExampleTests(unittest.TestCase):
             self.assertEqual(second.wait(timeout=5), 0)
 
 
-if __name__ == "__main__": unittest.main()
+if __name__ == "__main__":
+    unittest.main()
