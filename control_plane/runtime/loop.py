@@ -52,7 +52,15 @@ class RuntimeLoop:
             rounds += 1
             progressed = False
             phase_failed = [False, False, False]
-            preparer = self.preparer or getattr(self.dispatcher, "preparer", None)
+            if self.preparer is not None:
+                preparer = self.preparer
+            else:
+                # Do not use getattr here: unittest.mock.Mock (and similar
+                # proxy objects) manufactures an arbitrary ``preparer``
+                # attribute, making a dispatcher without a preparation phase
+                # look like one that succeeds every round.  Real dispatchers
+                # store configured collaborators in their instance mapping.
+                preparer = getattr(self.dispatcher, "__dict__", {}).get("preparer")
             if preparer is not None:
                 try:
                     progressed = progressed or bool(preparer.prepare_once())
