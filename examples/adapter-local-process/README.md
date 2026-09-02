@@ -43,6 +43,15 @@ demo currently uses `CONVERGED:` in the log and tolerant UTF-8 decoding; the fak
 `diverge` mode exits zero without that marker. Result extraction is also a TODO: the
 example returns contract-shaped records but production must define how `result.json`
 becomes a SolverRunRecord and evidence artifact.
+ 
+## Measured solve duration
+
+`fake_solver.py` writes `solver-timing.json` around the solve operation itself.
+`adapter.py` parses `solve_finished_ns - solve_started_ns` and reports it as the
+`SolverRunRecord.wall_seconds` field. This deliberately excludes process startup,
+polling, and termination time. If the timing file is missing or invalid, the
+adapter reports `wall_seconds=None`; it never substitutes the attempt lifetime or
+another approximation.
 
 Run exactly from the repository root:
 

@@ -152,10 +152,18 @@ class SimulationWorker:
         code = self._procs.get(ref).returncode if ref in self._procs else None
         try: text = Path(item["log_path"]).read_bytes().decode("utf-8", errors="replace")
         except OSError: text = ""
+        timing_seconds: float | None = None
+        try:
+            timing = json.loads((Path(item["root"]) / "solver-timing.json").read_text(encoding="utf-8"))
+            started = int(timing["solve_started_ns"]); finished = int(timing["solve_finished_ns"])
+            if finished >= started: timing_seconds = (finished - started) / 1_000_000_000
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            # Missing/corrupt solver timing is not approximated with attempt lifetime.
+            timing_seconds = None
         converged = observed == "completed" and "CONVERGED:" in text
         exhausted = observed == "completed" and not converged
         package = plan.get("base_package", {"artifact_id": "artifact.local-package", "revision": "sha256:" + "0" * 64})
-        run = make_solver_run_record(plan_id=plan["plan_id"], sequence=1, run_id=ref, package_artifact_id=package["artifact_id"], package_revision=package["revision"], numerical_profile_revision=plan.get("recovery_profile_revision", "sha256:" + "0" * 64), action="initial", status="completed" if converged else "failed", exit_code=0 if converged or exhausted else code, artifact_ids=["artifact.local.result"] if converged else [])
+        run = make_solver_run_record(plan_id=plan["plan_id"], sequence=1, run_id=ref, package_artifact_id=package["artifact_id"], package_revision=package["revision"], numerical_profile_revision=plan.get("recovery_profile_revision", "sha256:" + "0" * 64), action="initial", status="completed" if converged else "failed", exit_code=0 if converged or exhausted else code, artifact_ids=["artifact.local.result"] if converged else [], wall_seconds=timing_seconds)
         result_status = "completed" if converged else "exhausted" if exhausted else "indeterminate"
         result = make_simulation_session_result(plan_id=plan["plan_id"], attempt_id=plan["attempt_id"], session_ref=ref, status=result_status, solver_run_record_ids=[run["record_id"]], journal_artifact_id="artifact.local.journal", evidence_artifact_ids=["artifact.local.result"] if converged else [], terminal_cause=None if converged else "solver-not-converged")
         return result, item["log_path"]

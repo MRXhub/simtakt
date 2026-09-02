@@ -18,11 +18,18 @@ def main() -> int:
     encoding = "cp936" if a.mode == "nonutf8" else "utf-8"
     with (root / "solver.log").open("w", encoding=encoding, errors="replace") as log:
         log.write("fake solver started\n")
+        solve_started_ns = time.time_ns()
         if a.mode in ("normal", "nonutf8"):
             log.write("CONVERGED: residual=0 温度\n")
             (root / "result.json").write_text(json.dumps({"value": 42, "token": a.token}), encoding="utf-8")
         elif a.mode == "diverge": log.write("diverged 收敛失败\n")
         log.flush()
+        # This interval is the solver's solve operation, not process/attempt lifetime.
+        solve_finished_ns = time.time_ns()
+        (root / "solver-timing.json").write_text(json.dumps({
+            "solve_started_ns": solve_started_ns,
+            "solve_finished_ns": solve_finished_ns,
+        }), encoding="utf-8")
         if a.mode in ("hang", "tree"):
             while True: time.sleep(1)
     return 0
