@@ -51,9 +51,15 @@ class CompositionTests(unittest.TestCase):
             return_value={"formal_target_ids": formal_target_ids or ["one"]}),
             patch.object(comp, "resolve_control_plane_database", return_value=root / "x.db"),
             patch.object(comp, "resolve_governed_scheduling_policy", return_value=object()),
-            patch.object(comp, "SQLiteEvaluationRepository", return_value=object()),
+            patch.object(
+                comp, "SQLiteEvaluationRepository",
+                return_value=types.SimpleNamespace(),
+            ),
             patch.object(comp, "EvaluationMiddleware", return_value=object()),
-            patch.object(comp, "PreparedExecutionDispatcher", return_value=object())]
+            patch.object(
+                comp, "PreparedExecutionDispatcher",
+                return_value=types.SimpleNamespace(),
+            )]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
