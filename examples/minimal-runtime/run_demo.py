@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".runtime"
+DATA = ROOT / "data"
 sys.path.insert(0, str(ROOT.parent.parent))
 
 from control_plane.core.evaluation_contracts import (
@@ -64,7 +65,13 @@ def _unresolved_reason(evaluation_id: str) -> str | None:
 
 
 def main() -> int:
+    # Start from a clean state every run: .runtime/ holds the disposable
+    # workspace and data/ holds the control-plane SQLite database.  A stale
+    # data/ left by an earlier or interrupted run leaks queued/qualifying
+    # evaluations (keyed by a deterministic idempotency key) and parameter
+    # schema revisions, so the demo is not hermetic otherwise.
     shutil.rmtree(RUNTIME, ignore_errors=True)
+    shutil.rmtree(DATA, ignore_errors=True)
     try:
         RUNTIME.mkdir(parents=True)
         identity = _register_package()
@@ -104,6 +111,7 @@ def main() -> int:
     finally:
         (ROOT / "records" / "artifacts" / "package.minimal.input.json").unlink(missing_ok=True)
         shutil.rmtree(RUNTIME, ignore_errors=True)
+        shutil.rmtree(DATA, ignore_errors=True)
 
 
 if __name__ == "__main__":
