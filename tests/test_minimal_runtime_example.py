@@ -8,6 +8,12 @@ from pathlib import Path
 
 EXAMPLE = Path(__file__).parents[1] / "examples" / "minimal-runtime"
 
+# Loading minimal_components.py executes ``from control_plane... import ...``,
+# so the repository root must be importable even when this module is run
+# directly (python tests/test_minimal_runtime_example.py) rather than under a
+# test runner that already places it on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 _spec = importlib.util.spec_from_file_location(
     "_minimal_components", EXAMPLE / "minimal_components.py"
 )
