@@ -54,7 +54,7 @@ class FakeBatchQueue:
             job.state, job.exit_code = "CANCELLED", 130
             self.history[job.job_id] = job
 
-    def complete(self, job_id: str, exit_code: int = 0, elapsed: str = "00:00:00.250") -> None:
+    def complete(self, job_id: str, exit_code: int = 0, elapsed: str | None = None) -> None:
         job = self.active.pop(str(job_id), None)
         if job is None:
             raise KeyError(job_id)
