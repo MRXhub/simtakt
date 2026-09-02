@@ -303,12 +303,11 @@ class TaskShapeFeedbackLoopTests(unittest.TestCase):
         identity = None
         for wall in (10.0, 20.0, 30.0):
             attempt = self._prepare()
-            _, prep, opt = self._lease(attempt)
-            identity = self._identity(prep, opt)
-            self._complete(
+            _, prep, opt = self._complete(
                 attempt,
                 feedback=make_feedback_observation(success=True, wall_seconds=wall),
             )
+            identity = self._identity(prep, opt)
         for _ in range(2):
             self._complete(self._prepare())
 
@@ -320,7 +319,6 @@ class TaskShapeFeedbackLoopTests(unittest.TestCase):
         self.assertAlmostEqual(
             shape["successful_wall_stddev_seconds"], (200.0 / 3.0) ** 0.5
         )
-
     def test_distinct_task_classes_do_not_mix_statistics(self) -> None:
         for _ in range(3):
             attempt = self._prepare(target_id=TARGET)
