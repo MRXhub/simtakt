@@ -6,6 +6,24 @@ from typing import Any, Mapping
 from control_plane.simulation.session_contracts import make_simulation_session_result, make_solver_run_record
 from control_plane.simulation.worker import SessionStartFailure
 
+class _ResultWithRunRecord(dict):
+    """Contract result plus the emitted record for demonstration consumers."""
+
+    def __init__(self, result: Mapping[str, Any], run: Mapping[str, Any]) -> None:
+        super().__init__(result)
+        self._run = run
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "solver_run_record":
+            return self._run
+        return super().__getitem__(key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "solver_run_record":
+            return self._run
+        return super().get(key, default)
+
+
 class SimulationWorker:
     def __init__(self) -> None:
         self._meta: dict[str, dict[str, Any]] = {}
@@ -166,7 +184,7 @@ class SimulationWorker:
         run = make_solver_run_record(plan_id=plan["plan_id"], sequence=1, run_id=ref, package_artifact_id=package["artifact_id"], package_revision=package["revision"], numerical_profile_revision=plan.get("recovery_profile_revision", "sha256:" + "0" * 64), action="initial", status="completed" if converged else "failed", exit_code=0 if converged or exhausted else code, artifact_ids=["artifact.local.result"] if converged else [], wall_seconds=timing_seconds)
         result_status = "completed" if converged else "exhausted" if exhausted else "indeterminate"
         result = make_simulation_session_result(plan_id=plan["plan_id"], attempt_id=plan["attempt_id"], session_ref=ref, status=result_status, solver_run_record_ids=[run["record_id"]], journal_artifact_id="artifact.local.journal", evidence_artifact_ids=["artifact.local.result"] if converged else [], terminal_cause=None if converged else "solver-not-converged")
-        return result, item["log_path"]
+        return _ResultWithRunRecord(result, run), item["log_path"]
 
 
     terminate = terminate_session

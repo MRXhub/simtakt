@@ -18,8 +18,12 @@ def run(mode):
         time.sleep(.4); child=int((root/"solver.child.pid").read_text()); out=w.terminate_session(ref); print(f"tree terminate={out}, child_alive={w._alive(child)}")
     else:
         while w._procs[ref].poll() is None: time.sleep(.05)
-        print(f"{mode} observe={w.observe_session(ref)}")
-        timing = __import__("json").loads((root / "solver-timing.json").read_text())
-        seconds = (timing["solve_finished_ns"] - timing["solve_started_ns"]) / 1_000_000_000
-        print(f"{mode} measured_wall_seconds={seconds:.9f}")
+        result, _ = w.collect_session(ref)
+        record = result["solver_run_record"]
+        seconds = record["wall_seconds"]
+        if seconds is None:
+            print(f"{mode} measured_wall_seconds=unavailable")
+        else:
+            assert seconds > 0
+            print(f"{mode} measured_wall_seconds={seconds:.9f}")
 if __name__=="__main__": run("normal"); run("diverge"); run("tree")
