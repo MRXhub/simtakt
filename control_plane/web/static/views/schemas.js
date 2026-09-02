@@ -618,7 +618,9 @@ export async function renderSchemasView({ revision } = {}) {
       submitMsg.className = "submit-msg";
       submitMsg.textContent = t("connecting");
 
-      const r = await postJSON("/api/schemas", draft.doc);
+      const submitDoc = JSON.parse(JSON.stringify(draft.doc));
+      delete submitDoc.extract_names;
+      const r = await postJSON("/api/schemas", submitDoc);
       regBtn.disabled = false;
 
       if (!r || !r.ok || !r.data) {

@@ -201,8 +201,7 @@ export function renderPackagesView() {
       kind: "parameter-schema",
       problem_hint: state.packagesPackageName ? `problem:${state.packagesPackageName.replace(/^pkg-/, "")}` : "deck-derived-schema",
       parameters,
-      extracts: extracts.map(e => ({ name: e.name, expression: e.expression, line: e.line })),
-      extract_names: extracts.map(e => e.name)
+      extracts: extracts.map(e => ({ name: e.name, expression: e.expression, line: e.line }))
     };
   }
 
