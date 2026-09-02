@@ -66,82 +66,51 @@ class ExecutionPlanningTests(unittest.TestCase):
             performance_profile_snapshot=make_performance_profile_snapshot(
                 policy_revision=REVISION, profiles=profiles
             ),
-            authorizations=[
-                {"artifact_id": "authorization.a", "revision": REVISION, "target_id": "target-a"},
-                {"artifact_id": "authorization.b", "revision": REVISION, "target_id": "target-b"},
-            ],
         )
 
-    def test_selected_target_uses_its_authorization(self) -> None:
+    def test_selected_target_fixes_the_plan_target(self) -> None:
         plan = materialize_session_plan(
             attempt_id="attempt:11111111-1111-4111-8111-111111111111",
             preparation=self.preparation,
             selected_option=self.options[1],
         )
-        # The SessionPlan contract intentionally stores an artifact reference,
-        # while the Preparation lineage carries the routing target_id.
-        self.assertEqual(
-            plan["authorization"], {"artifact_id": "authorization.b", "revision": REVISION}
-        )
+        # The SessionPlan contract fixes target_id from the selected option and
+        # carries no task/authorization lineage of its own.
         self.assertEqual(plan["target_id"], "target-b")
+        self.assertIsNone(plan["authorization"])
+        self.assertIsNone(plan["task_id"])
 
-    def test_selected_target_requires_one_authorization(self) -> None:
-        unmatched = make_execution_option(
+    def test_selected_option_must_belong_to_the_preparation(self) -> None:
+        foreign = make_execution_option(
             simulation_definition_artifact_id="simulation-definition.fixture",
             simulation_definition_revision=REVISION,
-            runnable_package_artifact_id="package.unmatched",
+            runnable_package_artifact_id="package.foreign",
             runnable_package_revision=REVISION,
             target_id="target-c",
             processors=1,
             memory_bytes=4 * 1024**3,
             performance_class_id=PERFORMANCE_CLASS,
         )
-        no_match = make_execution_preparation(
-            evaluation_id="evaluation:22222222-2222-4222-8222-222222222222",
-            candidate_id=CANDIDATE_ID,
-            simulation_proxy="simulation-session-v1",
-            numerical_profile="proxy-managed-v1",
-            recovery_profile_revision=REVISION,
-            command_timeout_seconds=600,
-            max_solver_runs=1,
-            max_wall_seconds=900,
-            execution_option_set=self.preparation["execution_option_set"],
-            performance_profile_snapshot=self.preparation["performance_profile_snapshot"],
-            authorizations=[
-                {"artifact_id": "authorization.a", "revision": REVISION, "target_id": "target-a"},
-                {"artifact_id": "authorization.c", "revision": REVISION, "target_id": "target-c"},
-            ],
-        )
-        with self.assertRaisesRegex(ExecutionOptionError, "no unique authorization"):
+        with self.assertRaisesRegex(ExecutionOptionError, "part of the preparation"):
             materialize_session_plan(
                 attempt_id="attempt:11111111-1111-4111-8111-111111111111",
-                preparation=no_match,
-                selected_option=self.options[1],
+                preparation=self.preparation,
+                selected_option=foreign,
             )
 
-        duplicate = make_execution_preparation(
-            evaluation_id="evaluation:22222222-2222-4222-8222-222222222222",
-            candidate_id=CANDIDATE_ID,
-            simulation_proxy="simulation-session-v1",
-            numerical_profile="proxy-managed-v1",
-            recovery_profile_revision=REVISION,
-            command_timeout_seconds=600,
-            max_solver_runs=1,
-            max_wall_seconds=900,
-            execution_option_set=self.preparation["execution_option_set"],
-            performance_profile_snapshot=self.preparation["performance_profile_snapshot"],
-            authorizations=[
-                {"artifact_id": "authorization.a", "revision": REVISION, "target_id": "target-a"},
-                {"artifact_id": "authorization.b", "revision": REVISION, "target_id": "target-b"},
-                {"artifact_id": "authorization.c", "revision": REVISION, "target_id": "target-b"},
-            ],
+        plan_a = materialize_session_plan(
+            attempt_id="attempt:11111111-1111-4111-8111-111111111111",
+            preparation=self.preparation,
+            selected_option=self.options[0],
         )
-        with self.assertRaisesRegex(ExecutionOptionError, "no unique authorization"):
-            materialize_session_plan(
-                attempt_id="attempt:11111111-1111-4111-8111-111111111111",
-                preparation=duplicate,
-                selected_option=self.options[1],
-            )
+        plan_b = materialize_session_plan(
+            attempt_id="attempt:11111111-1111-4111-8111-111111111111",
+            preparation=self.preparation,
+            selected_option=self.options[1],
+        )
+        self.assertEqual(plan_a["target_id"], "target-a")
+        self.assertEqual(plan_b["target_id"], "target-b")
+        self.assertNotEqual(plan_a["plan_id"], plan_b["plan_id"])
 
 
 if __name__ == "__main__":
