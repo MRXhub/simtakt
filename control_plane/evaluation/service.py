@@ -918,15 +918,15 @@ class EvaluationMiddleware:
             return validate_feedback_observation(
                 {
                     "success": success,
-                    "wall_seconds": feedback.get("wall_seconds")
-                    if feedback.get("wall_seconds") is not None
+                    "wall_seconds": feedback["wall_seconds"]
+                    if "wall_seconds" in feedback
                     else derived.get("wall_seconds"),
-                    "cpu_seconds": feedback.get("cpu_seconds")
-                    if feedback.get("cpu_seconds") is not None
+                    "cpu_seconds": feedback["cpu_seconds"]
+                    if "cpu_seconds" in feedback
                     else derived.get("cpu_seconds"),
                     "busy_seconds": feedback.get("busy_seconds"),
-                    "rss_bytes": feedback.get("rss_bytes")
-                    if feedback.get("rss_bytes") is not None
+                    "rss_bytes": feedback["rss_bytes"]
+                    if "rss_bytes" in feedback
                     else derived.get("rss_bytes"),
                 }
             )
