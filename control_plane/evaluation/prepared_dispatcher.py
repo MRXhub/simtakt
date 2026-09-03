@@ -464,7 +464,7 @@ class PreparedExecutionDispatcher(SessionLifecycleDispatcher):
             if meta.get("last_observed_status") != "running":
                 continue
             kill_at = self._parse_orphan_timestamp(meta.get("kill_at"))
-            if kill_at is None or now < kill_at:
+            if kill_at is not None and now < kill_at:
                 deferred.add(orphan.get("evaluation_id"))
         return deferred
 

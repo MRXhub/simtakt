@@ -60,7 +60,7 @@ _CAPACITY_HOLDING_ATTEMPT_STATES_SQL = attempt_states_sql(CAPACITY_HOLDING_ATTEM
 _HEARTBEATABLE_ATTEMPT_STATES_SQL = attempt_states_sql(HEARTBEATABLE_ATTEMPT_STATES)
 
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 _SHA256_REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -493,10 +493,15 @@ class SQLiteEvaluationRepository:
                             FOREIGN KEY (evaluation_id) REFERENCES evaluations(evaluation_id)
                         )"""
                     )
-                    connection.execute(
-                        "CREATE INDEX IF NOT EXISTS idx_orphan_sessions_status "
-                        "ON orphan_sessions(status, created_at)"
-                    )
+                    orphan_columns = {
+                        str(row["name"])
+                        for row in connection.execute("PRAGMA table_info(orphan_sessions)")
+                    }
+                    if "harvest_status" not in orphan_columns:
+                        connection.execute(
+                            "ALTER TABLE orphan_sessions "
+                            "ADD COLUMN harvest_status TEXT"
+                        )
                     study_columns = {
                         str(row["name"])
                         for row in connection.execute("PRAGMA table_info(studies)")
