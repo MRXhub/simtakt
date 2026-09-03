@@ -726,6 +726,7 @@ class EvaluationMiddleware:
         session_plan: Mapping[str, Any],
         allocation: Mapping[str, Any],
         license_sessions: int | None = None,
+        orphans_hold_license: bool = True,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         return self._repository.claim_prepared_execution(
@@ -737,6 +738,7 @@ class EvaluationMiddleware:
             session_plan=session_plan,
             allocation=allocation,
             license_sessions=license_sessions,
+            orphans_hold_license=orphans_hold_license,
             now=now,
         )
 

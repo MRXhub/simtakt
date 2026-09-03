@@ -3297,6 +3297,7 @@ class SQLiteEvaluationRepository:
         session_plan: Mapping[str, Any],
         allocation: Mapping[str, Any],
         license_sessions: int | None = None,
+        orphans_hold_license: bool = True,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
         """Atomically select an option, materialize its plan, and allocate it."""
@@ -3410,11 +3411,12 @@ class SQLiteEvaluationRepository:
                         """
                     ).fetchone()[0]
                 )
-                active_count += int(
-                    connection.execute(
-                        "SELECT COUNT(*) FROM orphan_sessions WHERE status='open'"
-                    ).fetchone()[0]
-                )
+                if orphans_hold_license:
+                    active_count += int(
+                        connection.execute(
+                            "SELECT COUNT(*) FROM orphan_sessions WHERE status='open'"
+                        ).fetchone()[0]
+                    )
                 if active_count >= license_sessions:
                     raise RepositoryError(
                         "license sessions exhausted: "

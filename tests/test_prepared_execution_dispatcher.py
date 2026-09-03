@@ -1022,13 +1022,118 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
         self.assertEqual(still_open[0]["metadata"]["last_observed_status"], "running")
         self.assertEqual(running_worker.terminate_calls, 0)
 
-        # The prepared dispatcher defers the running, not-yet-killable orphan.
-        prepared = self.dispatcher(FakeResourceMonitor())
-        self.assertIn(
-            orphan["evaluation_id"],
-            prepared._orphan_deferred_evaluation_ids(within),
+    def test_orphans_hold_license_false_frees_capacity_for_the_same_orphan(
+        self,
+    ) -> None:
+        """orphans_hold_license=false keeps an open orphan from occupying a license.
+
+        Regression: claim_prepared_execution counts open orphans against license
+        capacity only when the ``orphans_hold_license`` flag is true.  With a
+        one-session license and one open orphan, a fresh candidate is blocked
+        when the flag is true but claimed when it is false.
+        """
+        mw = self.middleware
+        repo = mw._repository
+        now = datetime.now(timezone.utc)
+        # A first attempt that ends up with an open orphan, no longer holding
+        # license capacity as a running/reconciling Attempt itself.
+        first = self.prepare()
+        prep, opt, plan, alloc = self.claim_materials(
+            first, session_ref="session-lic-orphan"
+        )
+        self.assertIsNotNone(
+            repo.claim_prepared_execution(
+                first["attempt_id"], "dispatcher:fixture", 120,
+                preparation_id=prep["preparation_id"],
+                selected_option_id=opt["option_id"],
+                session_plan=plan, allocation=alloc, now=now,
+            )
+        )
+        repo.confirm_attempt_start(first["attempt_id"], "dispatcher:fixture", now=now)
+        mw.require_reconciliation(
+            first["attempt_id"], "dispatcher:fixture",
+            reason="lost-controller", now=now,
+        )
+        released = repo.auto_release_wall_budget(
+            {first["attempt_id"]: 1},
+            now=now + timedelta(seconds=2),
+        )
+        self.assertTrue(
+            any(r["attempt_id"] == first["attempt_id"] for r in released)
+        )
+        orphans = repo.list_orphan_sessions("open")
+        self.assertEqual(len(orphans), 1)
+        orphan_evaluation = orphans[0]["evaluation_id"]
+
+        def _claim(fresh_attempt: dict, *, hold_license: bool) -> dict | None:
+            preparation = fresh_attempt["execution_preparation"]
+            target_id = preparation["execution_option_set"]["options"][0][
+                "target_id"
+            ]
+            resources = {
+                "schema_version": 1, "snapshot_kind": "resource-snapshot",
+                "snapshot_revision": REVISION, "target_id": target_id,
+                "status": "ready", "available_processors": 4,
+                "available_memory_bytes": 8 * 1024**3,
+                "default_request_memory_bytes": 4 * 1024**3,
+                "observed_allocation_keys": [], "reasons": [],
+                "created_at": now.isoformat(), "lock_held": True,
+                "remote_workspace_root": "/remote/test-workspace",
+            }
+            decision = schedule(
+                [{
+                    "attempt_id": fresh_attempt["attempt_id"],
+                    "execution_option_set": preparation["execution_option_set"],
+                    "performance_profile_snapshot": preparation[
+                        "performance_profile_snapshot"
+                    ],
+                }],
+                [],
+                resources,
+            )
+            option = scheduling_decision_plain(
+                decision["selected_execution_option"]
+            )
+            session_plan = materialize_session_plan(
+                attempt_id=fresh_attempt["attempt_id"],
+                preparation=preparation, selected_option=option,
+            )
+            suffix = fresh_attempt["attempt_id"].split(":")[-1][:12]
+            allocation = make_resource_allocation(
+                decision, session_ref=f"session-{suffix}",
+                run_id="20260803-000000-001",
+                remote_workspace_root=resources["remote_workspace_root"],
+                decision_artifact_id="evidence.scheduling.fixture",
+                decision_artifact_path="decision.json",
+            )
+            return repo.claim_prepared_execution(
+                fresh_attempt["attempt_id"], "dispatcher:fixture", 120,
+                preparation_id=preparation["preparation_id"],
+                selected_option_id=option["option_id"],
+                session_plan=session_plan, allocation=allocation,
+                license_sessions=1, orphans_hold_license=hold_license,
+                now=now + timedelta(seconds=3),
+            )
+
+        # orphans_hold_license=True: the same open orphan consumes the one-session
+        # license and blocks a fresh claim.
+        blocked = self.prepare_other_candidate(target_id=TARGET)
+        self.assertNotEqual(blocked["evaluation_id"], orphan_evaluation)
+        with self.assertRaises(RepositoryError):
+            _claim(blocked, hold_license=True)
+        self.assertEqual(
+            mw.get_attempt(blocked["attempt_id"])["status"], "planned"
         )
 
+        # orphans_hold_license=False: the same orphan no longer occupies a
+        # license, so the fresh candidate is claimed.
+        admitted = self.prepare_other_candidate(target_id=TARGET)
+        self.assertNotEqual(admitted["evaluation_id"], orphan_evaluation)
+        claimed = _claim(admitted, hold_license=False)
+        self.assertIsNotNone(claimed)
+        self.assertEqual(
+            mw.get_attempt(admitted["attempt_id"])["status"], "starting"
+        )
     def test_wait_does_not_materialize_plan_or_allocate(self) -> None:
         prepared = self.prepare(processors=2)
         worker = RecordingWorker(self.root)

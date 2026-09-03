@@ -319,6 +319,9 @@ class PreparedExecutionDispatcher(SessionLifecycleDispatcher):
                     capacity_envelope["license_sessions"]
                     - capacity_envelope.get("license_reserve", 0)
                 ),
+                orphans_hold_license=bool(
+                    self.scheduling_policy.orphans_hold_license
+                ),
                 now=current_time,
             )
             if attempt is None:
