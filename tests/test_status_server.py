@@ -781,6 +781,102 @@ class RealRepositoryListEndpointsTests(unittest.TestCase):
         self.assertEqual(pkg_item["status"], "registered")
         self.assertEqual(pkg_item["created_at"], "2026-08-28T12:00:00+00:00")
         self.assertIn("revision", pkg_item)
+
+    def test_evaluations_origin_query_filter_and_lineage(self) -> None:
+        schema_dict = {
+            "kind": "parameter-schema",
+            "problem_hint": "origin-filter",
+            "source_package": {
+                "artifact_id": "package.origin.v1",
+                "revision": "sha256:" + "a" * 64,
+            },
+            "parameters": [
+                {
+                    "name": "t_total1",
+                    "type": "float",
+                    "role": "variable",
+                    "bounds": {"min": 0.1, "max": 1.0},
+                    "default": 0.551,
+                }
+            ],
+            "extracts": [
+                {"name": "1Jsc", "expression": "$Jsc", "line": 10},
+            ],
+        }
+        schema_rec = self.middleware.register_schema(schema_dict)
+        schema_rev = schema_rec["revision"]
+        problem = make_problem_definition(
+            problem_id="problem:origin-filter",
+            parameter_schema_revision=schema_rev,
+            constraint_revision="sha256:" + "0" * 64,
+            simulation_capabilities=["cpu"],
+            metric_schema_revision="sha256:" + "0" * 64,
+        )
+        problem_rec = self.middleware.register_problem(problem)
+        problem_rev = problem_rec["revision"]
+        self.middleware.create_study(
+            study_id="study:origin-filter-a",
+            problem_id="problem:origin-filter",
+            problem_revision=problem_rev,
+        )
+
+        cand_a = make_candidate(
+            problem_id="problem:origin-filter",
+            problem_revision=problem_rev,
+            parameters={"t_total1": 0.551},
+        )
+        req_a = make_evaluation_request(
+            candidate_id=cand_a["candidate_id"],
+            fidelity="high",
+            requested_outputs=["score"],
+            evidence_profile="default",
+            origin="designer:smoke",
+        )
+        eval_a = self.middleware.submit(cand_a, req_a, study_id="study:origin-filter-a")
+
+        cand_b = make_candidate(
+            problem_id="problem:origin-filter",
+            problem_revision=problem_rev,
+            parameters={"t_total1": 0.652},
+        )
+        req_b = make_evaluation_request(
+            candidate_id=cand_b["candidate_id"],
+            fidelity="high",
+            requested_outputs=["score"],
+            evidence_profile="default",
+            origin="cli:batch",
+        )
+        eval_b = self.middleware.submit(cand_b, req_b)
+
+        status, _, payload = self._get("/api/evaluations")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["items"]), 2)
+
+        status, _, payload = self._get("/api/evaluations?origin=designer%3Asmoke")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["items"]), 1)
+        row = payload["items"][0]
+        self.assertEqual(row["evaluation_id"], eval_a["evaluation_id"])
+        self.assertEqual(row["origin"], "designer:smoke")
+        self.assertEqual(row["problem_id"], "problem:origin-filter")
+        self.assertEqual(row["problem_revision"], problem_rev)
+        self.assertEqual(row["study_ids"], ["study:origin-filter-a"])
+
+        status, _, payload = self._get("/api/evaluations?origin=cli%3Abatch")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["items"]), 1)
+        row = payload["items"][0]
+        self.assertEqual(row["evaluation_id"], eval_b["evaluation_id"])
+        self.assertEqual(row["origin"], "cli:batch")
+        self.assertEqual(row["study_ids"], [])
+
+        status, _, payload = self._get("/api/evaluations?origin=no-such-origin")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["items"], [])
+
+        status, _, _ = self._get("/api/evaluations?origin=not%20valid")
+        self.assertEqual(status, 400)
+
 class AuditFindingsTests(unittest.TestCase):
     def test_read_only_start_mutates_nothing(self) -> None:
         with tempfile.TemporaryDirectory(prefix="test-readonly-root-") as tmpdir:

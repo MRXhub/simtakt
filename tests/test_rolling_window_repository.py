@@ -1293,6 +1293,43 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             count = connection.execute("SELECT COUNT(*) FROM evaluations").fetchone()[0]
         self.assertEqual(count, 1)
 
+    def test_list_evaluations_filters_by_origin_and_reports_lineage(self) -> None:
+        self.repository.create_study(
+            study_id="study-origin-a",
+            problem_id=self.problem["problem_id"],
+            problem_revision=self.problem["revision"],
+        )
+        _, eval_a = self._submit_with_origin(origin="designer:smoke", x=1.0)
+        self.repository.associate_study_evaluation("study-origin-a", eval_a["evaluation_id"])
+        _, eval_b = self._submit_with_origin(origin="cli:batch", x=2.0)
+
+        all_rows = self.repository.list_evaluations()
+        self.assertEqual(len(all_rows), 2)
+        row_a = next(
+            row for row in all_rows
+            if row["evaluation_id"] == eval_a["evaluation_id"]
+        )
+        self.assertEqual(row_a["origin"], "designer:smoke")
+        self.assertEqual(row_a["problem_id"], self.problem["problem_id"])
+        self.assertEqual(row_a["problem_revision"], self.problem["revision"])
+        self.assertEqual(row_a["study_ids"], ["study-origin-a"])
+        row_b = next(
+            row for row in all_rows
+            if row["evaluation_id"] == eval_b["evaluation_id"]
+        )
+        self.assertEqual(row_b["origin"], "cli:batch")
+        self.assertEqual(row_b["study_ids"], [])
+
+        self.assertEqual(
+            [row["evaluation_id"] for row in self.repository.list_evaluations(origin="designer:smoke")],
+            [eval_a["evaluation_id"]],
+        )
+        self.assertEqual(
+            [row["evaluation_id"] for row in self.repository.list_evaluations(origin="cli:batch")],
+            [eval_b["evaluation_id"]],
+        )
+        self.assertEqual(self.repository.list_evaluations(origin="no-such-origin"), [])
+
     def test_v14_to_v15_migration_adds_origin_and_preserves_bookkeeping(self) -> None:
         # Simulate a v14 database by removing the v15 origin column and ledger row,
         # and recording the 12..14 upgrade ledger like a real v14 database carries.

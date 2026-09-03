@@ -263,9 +263,15 @@ class EvaluationMiddleware:
         return self._repository.list_problem_evaluations(problem_id, problem_revision)
 
     def list_evaluations(
-        self, problem_id: str | None = None, problem_revision: str | None = None
+        self,
+        problem_id: str | None = None,
+        problem_revision: str | None = None,
+        *,
+        origin: str | None = None,
     ) -> list[dict[str, Any]]:
-        return self._repository.list_evaluations(problem_id, problem_revision)
+        return self._repository.list_evaluations(
+            problem_id, problem_revision, origin=origin
+        )
 
     def submit(
         self,

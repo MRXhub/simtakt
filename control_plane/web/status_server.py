@@ -78,6 +78,20 @@ def parse_overview_limit(query: str) -> int | None:
         raise _HttpError(400, "limit must be a positive integer")
     return limit
 
+def parse_origin_query(query: str) -> str | None:
+    """Parse the optional /api/evaluations origin filter, validating the token."""
+    params = urllib.parse.parse_qs(query, keep_blank_values=True)
+    values = params.get("origin", [])
+    if len(values) > 1 or (values and not values[0]):
+        raise _HttpError(400, "origin must be a single stable token")
+    if not values:
+        return None
+    from control_plane.core.evaluation_contracts import normalize_token
+    try:
+        return normalize_token(values[0], "origin")
+    except ContractError:
+        raise _HttpError(400, "origin must be a valid stable token")
+
 
 
 class StatusServer(ThreadingHTTPServer):
@@ -240,6 +254,7 @@ class DemoMiddleware:
             "evidence_profile": "default",
             "independence_requirement": "normal",
             "priority": "normal",
+            "origin": "designer:smoke",
             "idempotency_key": "sha256:" + "4" * 64,
             "status": "queued",
             "observation_id": None,
@@ -280,10 +295,27 @@ class DemoMiddleware:
     def list_problem_evaluations(self, problem_id: str, *_args: Any) -> list[dict[str, Any]]:
         return [e for e in self._evaluations if e.get("problem_id") == problem_id]
 
-    def list_evaluations(self, problem_id: str | None = None, *_args: Any) -> list[dict[str, Any]]:
-        if problem_id is None:
-            return list(self._evaluations)
-        return [e for e in self._evaluations if e.get("problem_id") == problem_id]
+    def list_evaluations(
+        self,
+        problem_id: str | None = None,
+        *,
+        origin: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = [
+            e for e in self._evaluations
+            if (problem_id is None or e.get("problem_id") == problem_id)
+            and (origin is None or e.get("origin") == origin)
+        ]
+        study_of: dict[str, list[str]] = {}
+        for study_id, eval_ids in self._study_evaluations.items():
+            for eval_id in eval_ids:
+                study_of.setdefault(eval_id, []).append(study_id)
+        enriched = []
+        for item in rows:
+            row = dict(item)
+            row["study_ids"] = sorted(study_of.get(row.get("evaluation_id"), []))
+            enriched.append(row)
+        return enriched
 
     def list_problems(self) -> list[dict[str, Any]]:
         return list(self._problems)
@@ -568,7 +600,8 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
             study_id = urllib.parse.unquote(path[len("/api/studies/"):])
             return self.server.middleware.get_study_status(study_id)
         if path == "/api/evaluations":
-            return {"items": self.server.middleware.list_evaluations()}
+            origin = parse_origin_query(query)
+            return {"items": self.server.middleware.list_evaluations(origin=origin)}
         raise _HttpError(404, f"unknown path: {path}")
 
     def _send_static(self) -> None:

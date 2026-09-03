@@ -1285,38 +1285,59 @@ class SQLiteEvaluationRepository:
             return evaluations
 
     def list_evaluations(
-        self, problem_id: str | None = None, problem_revision: str | None = None
+        self,
+        problem_id: str | None = None,
+        problem_revision: str | None = None,
+        *,
+        origin: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return the immutable Evaluation projection for one Problem lineage, or all Evaluations."""
+        """Return Evaluation records filtered by Problem lineage and/or request
+        origin, each row augmented with its Problem lineage and Study memberships.
+
+        The immutable request projection (all EvaluationRequest fields plus
+        status/timestamps) is preserved, so origin round-trips through the row;
+        problem_id/problem_revision/study_ids are advisory join projections on
+        top of that core record.
+        """
+        conditions: list[str] = []
+        params: list[Any] = []
+        if problem_id is not None:
+            conditions.append("c.problem_id = ?")
+            params.append(normalize_token(problem_id, "problem_id"))
+        if problem_revision is not None:
+            revision = str(problem_revision).strip().lower()
+            if not _SHA256_REVISION.fullmatch(revision):
+                raise ContractError(
+                    "problem_revision must be sha256:<64 lowercase hex characters>"
+                )
+            conditions.append("c.problem_revision = ?")
+            params.append(revision)
+        if origin is not None:
+            conditions.append("e.origin = ?")
+            params.append(normalize_token(origin, "origin"))
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
+        sql = (
+            "SELECT e.*, c.problem_id, c.problem_revision "
+            "FROM evaluations e "
+            "JOIN candidates c ON c.candidate_id = e.candidate_id"
+            + where
+            + " ORDER BY e.created_at, e.evaluation_id"
+        )
         with closing(self._connect()) as connection:
-            if problem_id is None:
-                rows = connection.execute(
-                    "SELECT * FROM evaluations ORDER BY created_at, evaluation_id"
+            rows = connection.execute(sql, params).fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                record = self._evaluation_record(row)
+                record["problem_id"] = str(row["problem_id"])
+                record["problem_revision"] = str(row["problem_revision"])
+                study_rows = connection.execute(
+                    """SELECT study_id FROM study_evaluations
+                       WHERE evaluation_id = ? ORDER BY study_id""",
+                    (row["evaluation_id"],),
                 ).fetchall()
-            elif problem_revision is None:
-                normalized_id = normalize_token(problem_id, "problem_id")
-                rows = connection.execute(
-                    """SELECT e.* FROM evaluations e
-                       JOIN candidates c ON c.candidate_id = e.candidate_id
-                       WHERE c.problem_id = ?
-                       ORDER BY e.created_at, e.evaluation_id""",
-                    (normalized_id,),
-                ).fetchall()
-            else:
-                normalized_id = normalize_token(problem_id, "problem_id")
-                revision = str(problem_revision).strip().lower()
-                if not _SHA256_REVISION.fullmatch(revision):
-                    raise ContractError(
-                        "problem_revision must be sha256:<64 lowercase hex characters>"
-                    )
-                rows = connection.execute(
-                    """SELECT e.* FROM evaluations e
-                       JOIN candidates c ON c.candidate_id = e.candidate_id
-                       WHERE c.problem_id = ? AND c.problem_revision = ?
-                       ORDER BY e.created_at, e.evaluation_id""",
-                    (normalized_id, revision),
-                ).fetchall()
-            return [self._evaluation_record(row) for row in rows]
+                record["study_ids"] = [str(item["study_id"]) for item in study_rows]
+                result.append(record)
+        return result
 
     def associate_study_evaluation(self, study_id: str, evaluation_id: str) -> None:
         normalized_study_id = normalize_token(study_id, "study_id")

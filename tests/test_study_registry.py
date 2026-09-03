@@ -153,7 +153,14 @@ class StudyRegistryTests(unittest.TestCase):
     def test_study_none_and_unknown_study(self) -> None:
         request = self.request()
         plain = self.middleware.submit(self.candidate, request)
-        self.assertEqual(self.middleware.list_evaluations(self.problem["problem_id"]), [plain])
+        listed = self.middleware.list_evaluations(self.problem["problem_id"])
+        self.assertEqual(len(listed), 1)
+        row = listed[0]
+        for key, value in plain.items():
+            self.assertEqual(row[key], value, key)
+        self.assertEqual(row["problem_id"], self.problem["problem_id"])
+        self.assertEqual(row["problem_revision"], self.problem["revision"])
+        self.assertEqual(row["study_ids"], [])
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM study_evaluations").fetchone()[0],
