@@ -202,5 +202,305 @@ class ResolveWallBudgetUnitTests(unittest.TestCase):
         self.assertEqual(result["stall_seconds"], math.ceil(0.25 * 120))
 
 
+class WallBudgetRepositoryIntegrationTests(unittest.TestCase):
+    """Real-SQLite checks of budget persistence, the wall-proof clock, and the
+    legacy 1.7 x max_wall fallback."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.database = Path(self.temp.name) / "control.sqlite3"
+        self.repository = SQLiteEvaluationRepository(self.database)
+        from tests.shared_fixtures import register_fixture_schema
+        schema_revision = register_fixture_schema(
+            self.repository, problem_hint="wall-budget"
+        )
+        self.problem = make_problem_definition(
+            problem_id="wall-budget-fixture",
+            parameter_schema_revision=schema_revision,
+            constraint_revision=REVISION,
+            simulation_capabilities=["full-tcad"],
+            metric_schema_revision=REVISION,
+        )
+        self.repository.register_problem(self.problem)
+        self.submission_count = 0
+        self.clock = datetime.now(timezone.utc) + timedelta(hours=1)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def submit(self) -> dict:
+        self.submission_count += 1
+        candidate = make_candidate(
+            problem_id=self.problem["problem_id"],
+            problem_revision=self.problem["revision"],
+            parameters={"x": float(self.submission_count)},
+        )
+        request = make_evaluation_request(
+            candidate_id=candidate["candidate_id"],
+            fidelity="full-tcad",
+            requested_outputs=["Eff"],
+            evidence_profile="fixture-v1",
+        )
+        evaluation = self.repository.submit_evaluation(candidate, request)
+        return {"candidate": candidate, "evaluation": evaluation}
+
+    def _preparation(self, submission: dict, *, target_id: str = TARGET) -> dict:
+        option = make_execution_option(
+            simulation_definition_artifact_id="simulation-definition.fixture",
+            simulation_definition_revision=REVISION,
+            runnable_package_artifact_id="package.fixture-p1",
+            runnable_package_revision=REVISION,
+            target_id=target_id,
+            processors=1,
+            memory_bytes=4 * 1024**3,
+            performance_class_id=PERFORMANCE_CLASS_ID,
+        )
+        profile = make_performance_profile(
+            execution_option_id=option["option_id"],
+            evidence_artifact_id="evidence.performance.fixture",
+            evidence_revision=REVISION,
+            sample_count=2,
+            duration_p50_seconds=120,
+            duration_p90_seconds=150,
+            peak_rss_p90_bytes=2 * 1024**3,
+            performance_class_id=PERFORMANCE_CLASS_ID,
+        )
+        return make_execution_preparation(
+            evaluation_id=submission["evaluation"]["evaluation_id"],
+            candidate_id=submission["candidate"]["candidate_id"],
+            simulation_proxy="simulation-session-v1",
+            numerical_profile="proxy-managed-v1",
+            recovery_profile_revision=REVISION,
+            command_timeout_seconds=600,
+            max_solver_runs=1,
+            max_wall_seconds=900,
+            execution_option_set=make_execution_option_set([option]),
+            performance_profile_snapshot=make_performance_profile_snapshot(
+                policy_revision=REVISION,
+                profiles=[profile],
+            ),
+        )
+
+    def _prepare(self) -> dict:
+        submission = self.submit()
+        return self.repository.create_prepared_attempt(
+            self._preparation(submission)
+        )
+
+    def _lease(self, attempt: dict) -> tuple[dict, dict, dict]:
+        preparation = attempt["execution_preparation"]
+        target_id = preparation["execution_option_set"]["options"][0]["target_id"]
+        resources = {
+            "schema_version": 1,
+            "snapshot_kind": "resource-snapshot",
+            "snapshot_revision": REVISION,
+            "target_id": target_id,
+            "status": "ready",
+            "available_processors": 1,
+            "available_memory_bytes": 8 * 1024**3,
+            "default_request_memory_bytes": 4 * 1024**3,
+            "observed_allocation_keys": [],
+            "reasons": [],
+            "created_at": self.clock.isoformat(),
+            "lock_held": True,
+            "target_is_idle": True,
+        }
+        decision = schedule(
+            [
+                {
+                    "attempt_id": attempt["attempt_id"],
+                    "execution_option_set": preparation["execution_option_set"],
+                    "performance_profile_snapshot": preparation[
+                        "performance_profile_snapshot"
+                    ],
+                }
+            ],
+            [],
+            resources,
+        )
+        option = decision["selected_execution_option"]
+        plan = materialize_session_plan(
+            attempt_id=attempt["attempt_id"],
+            preparation=preparation,
+            selected_option=option,
+        )
+        suffix = attempt["attempt_id"].split(":")[-1][:12]
+        allocation = make_resource_allocation(
+            decision,
+            session_ref=f"session-{suffix}",
+            run_id="20260803-000000-001",
+            remote_workspace_root="/remote/test-workspace",
+            decision_artifact_id="evidence.scheduling.fixture",
+            decision_artifact_path="decision.json",
+        )
+        leased = self.repository.claim_prepared_execution(
+            attempt["attempt_id"], WORKER, 300,
+            preparation_id=preparation["preparation_id"],
+            selected_option_id=option["option_id"],
+            session_plan=plan,
+            allocation=allocation,
+            now=self.clock,
+        )
+        self.assertIsNotNone(leased)
+        return leased, preparation, option
+
+    def _start_running(self, attempt: dict) -> dict:
+        self._lease(attempt)
+        self.repository.confirm_attempt_start(
+            attempt["attempt_id"], WORKER, now=self.clock
+        )
+        return attempt
+
+    def _reconcile(self, attempt: dict) -> None:
+        self._start_running(attempt)
+        self.repository.mark_attempt_reconciling(
+            attempt["attempt_id"], WORKER, ["artifact:recon"],
+            reason="fixture", now=self.clock,
+        )
+
+    def _iso(self, moment: datetime) -> str:
+        return moment.isoformat()
+
+    def _set_wall_budget_json(self, attempt_id: str, value: dict | None) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE attempts SET wall_budget_json = ? WHERE attempt_id = ?",
+                (None if value is None else json.dumps(value), attempt_id),
+            )
+            connection.commit()
+
+    def test_attempt_start_persists_wall_budget_json_with_full_fields(self) -> None:
+        submission = self.submit()
+        planned = self.repository.schedule_attempt(
+            evaluation_id=submission["evaluation"]["evaluation_id"],
+            simulation_adapter="fixture-adapter",
+            numerical_profile="fixture-profile",
+        )
+        leased = self.repository.lease_next_attempt(
+            "worker:1", 600, now=self.clock
+        )
+        self.assertIsNotNone(leased)
+        resolved = {
+            "budget_seconds": 120,
+            "kill_at_seconds": 204,
+            "stall_seconds": 30,
+            "source": "declared",
+            "sample_count": 0,
+            "widened": False,
+        }
+        self.repository.start_attempt(
+            leased["attempt_id"], "worker:1",
+            now=self.clock + timedelta(seconds=1),
+            wall_budget=resolved,
+        )
+        stored = self.repository.get_attempt(leased["attempt_id"])["wall_budget"]
+        self.assertEqual(stored, resolved)
+        self.assertEqual(
+            set(stored),
+            {"budget_seconds", "kill_at_seconds", "stall_seconds",
+             "source", "sample_count", "widened"},
+        )
+
+        # RED TEST: records an integration bug. The immutable budget's
+        # kill_at_seconds is persisted at Attempt start, and the wall-proof
+        # contract says an Attempt must only be released once that persisted
+        # threshold elapses.  In practice EvaluationMiddleware reads
+        # candidate["wall_budget"], but repository.list_reconciling_attempts_for_wall_proof
+        # never populates that key, so the persisted budget is ignored and the
+        # attempt falls back to 1.7 x plan max_wall instead.
+
+
+    def test_wall_proof_ignored_before_kill_at_and_releases_after(self) -> None:
+        attempt = self._prepare()
+        self._reconcile(attempt)
+        # Persisted budget carries an explicit 100 s kill threshold.
+        self._set_wall_budget_json(attempt["attempt_id"], {"kill_at_seconds": 100})
+        middleware = EvaluationMiddleware(self.repository)
+        self.assertEqual(
+            middleware.auto_release_wall_budget(
+                now=self.clock + timedelta(seconds=99)
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.repository.get_attempt(attempt["attempt_id"])["status"],
+            "reconciling",
+        )
+        released = middleware.auto_release_wall_budget(
+            now=self.clock + timedelta(seconds=101)
+        )
+        self.assertEqual(len(released), 1)
+        self.assertEqual(released[0]["status"], "released")
+        self.assertEqual(released[0]["proof_seconds"], 100)
+        self.assertEqual(
+            self.repository.get_attempt(attempt["attempt_id"])["status"], "lost"
+        )
+
+    def test_legacy_row_without_wall_budget_json_falls_back_to_1_7x_max_wall(self) -> None:
+        attempt = self._prepare()
+        self._reconcile(attempt)
+        # Strip the persisted budget to emulate a pre-v16 row.
+        self._set_wall_budget_json(attempt["attempt_id"], None)
+        middleware = EvaluationMiddleware(self.repository)
+        self.assertEqual(
+            middleware.auto_release_wall_budget(
+                now=self.clock + timedelta(seconds=1529)
+            ),
+            [],
+        )
+        released = middleware.auto_release_wall_budget(
+            now=self.clock + timedelta(seconds=1531)
+        )
+        self.assertEqual(len(released), 1)
+        # max_wall is 900 in the fixture -> 1.7 x 900 = 1530.
+        self.assertEqual(released[0]["proof_seconds"], 1530)
+
+    def test_wall_budget_killed_attempt_is_excluded_from_samples_and_counted_as_kill(
+        self,
+    ) -> None:
+        # One successful completed attempt contributes a wall sample.
+        completed = self._prepare()
+        self._lease(completed)
+        self.clock += timedelta(seconds=10)
+        self.repository.confirm_attempt_start(
+            completed["attempt_id"], WORKER, now=self.clock
+        )
+        self.repository.begin_collection(completed["attempt_id"], WORKER, now=self.clock)
+        self.repository.complete_attempt(
+            completed["attempt_id"], WORKER, ["artifact.completed"],
+            _validated_session_result=True, now=self.clock,
+            feedback=make_feedback_observation(success=True, wall_seconds=777.0),
+        )
+        # A second attempt is killed by the wall proof.
+        killed = self._prepare()
+        self.clock += timedelta(seconds=20)
+        self._reconcile(killed)
+        released = EvaluationMiddleware(self.repository).auto_release_wall_budget(
+            now=self.clock + timedelta(seconds=1600)
+        )
+        self.assertTrue(any(r["attempt_id"] == killed["attempt_id"] for r in released))
+
+        samples = self.repository.list_completed_wall_samples(
+            self.problem["revision"], "full-tcad"
+        )
+        sample_ids = {row["attempt_id"] for row in samples}
+        self.assertIn(completed["attempt_id"], sample_ids)
+        self.assertNotIn(killed["attempt_id"], sample_ids)
+        measured = {
+            row["attempt_id"]: row["measured_wall_seconds"] for row in samples
+        }
+        self.assertEqual(measured[completed["attempt_id"]], 777.0)
+        self.assertEqual(
+            self.repository.count_wall_budget_kills(
+                self.problem["revision"], "full-tcad"
+            ),
+            1,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
 if __name__ == "__main__":
     unittest.main()
