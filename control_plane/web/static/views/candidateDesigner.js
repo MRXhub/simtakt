@@ -29,6 +29,7 @@ function normalizeSha256Revision(rev, fallback) {
   }
   return fallback || DEFAULT_SHA256;
 }
+
 export function renderCandidateDesigner({ onSubmitted } = {}) {
   const cdState = state.candidateDesigner;
   const container = el("div", "candidate-workbench-view");
@@ -213,6 +214,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
       loadSchema(effectiveSchemaRev);
     }
   }
+
   // Dynamic Designer Workspace Area
   const dynamicArea = el("div", "designer-dynamic-area");
   actionSurface.appendChild(dynamicArea);
@@ -650,10 +652,27 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
 
     onFieldValChange = () => {
       cdState.previewResult = null;
+      cdState.lastSubmittedEval = null;
       updatePreflightSection();
     };
 
     updatePreflightSection();
+
+    if (cdState.previewResult) {
+      ep.textContent = JSON.stringify(cdState.previewResult, null, 2);
+    }
+    if (cdState.lastSubmittedEval) {
+      const { evalId, studyId } = cdState.lastSubmittedEval;
+      em.className = "submit-msg ok";
+      em.textContent = `🚀 ${t("msgEvalSubmitted")} Evaluation ID: ${evalId} ➔ ${t("targetStudyLabel", { id: studyId })}`;
+      const toQueueBtn = el("button", "plain primary", {
+        style: "margin-top: 8px;",
+        onclick: () => {
+          navigate(`#/study/${encodeURIComponent(studyId)}`);
+        }
+      }, t("btnGoToStudyQueue", { id: studyId }));
+      em.appendChild(el("div", { style: "margin-top: 6px;" }, toQueueBtn));
+    }
 
     // Generate Preview Action
     previewBtn.onclick = async () => {
@@ -747,8 +766,10 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
       }
 
       const evalId = r.data.evaluation_id || "eval:mock-created";
+      cdState.studyId = targetStudyId;
+      cdState.lastSubmittedEval = { evalId, studyId: targetStudyId };
       em.className = "submit-msg ok";
-      em.textContent = `🚀 ${t("msgEvalSubmitted")} Evaluation ID: ${evalId} ➔ ${t("targetStudyLabel", { id: cdState.studyId || "demo-study-a" })}`;
+      em.textContent = `🚀 ${t("msgEvalSubmitted")} Evaluation ID: ${evalId} ➔ ${t("targetStudyLabel", { id: targetStudyId })}`;
 
       const toQueueBtn = el("button", "plain primary", {
         style: "margin-top: 8px;",
@@ -759,7 +780,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
             navigate("#/compose?step=4");
           }
         }
-      }, t("btnGoToStudyQueue", { id: cdState.studyId || "demo-study-a" }));
+      }, t("btnGoToStudyQueue", { id: targetStudyId }));
       em.appendChild(el("div", { style: "margin-top: 6px;" }, toQueueBtn));
       if (onSubmitted) onSubmitted(r.data);
     };
