@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from control_plane.core.evaluation_contracts import ContractError
 from typing import Any, Protocol
@@ -16,7 +16,24 @@ from control_plane.simulation.worker import (
     normalize_session_observation,
     normalize_session_termination,
 )
-from control_plane.simulation.gateway import ReceiptIntegrityError
+def _orphan_timestamp(dt: datetime | None) -> str | None:
+    """Encode an aware datetime as the repository's ISO timestamp form."""
+    if dt is None or dt.tzinfo is None:
+        return None
+    return dt.isoformat()
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    """Parse an orphan metadata ISO timestamp into an aware datetime."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else None
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else None
+    return None
 
 
 class DispatchError(RuntimeError):
@@ -139,6 +156,12 @@ class SessionLifecycleDispatcher:
                 result = auto_release(now=now)
                 if isinstance(result, list):
                     self.last_auto_released = result
+        # Orphan session loop: bounded observe + kill_at / TTL recovery of open
+        # orphans runs after wall-proof release.  A failing orphan is isolated
+        # and never aborts the recovery round.
+        orphan_loop = getattr(self, "_reconcile_open_orphans", None)
+        if callable(orphan_loop):
+            orphan_loop(now=now)
         auto_requeue = getattr(self.middleware, "auto_requeue_recovering", None)
         if callable(auto_requeue):
             has_recovering = getattr(self.middleware, "has_recovering_evaluations", None)
@@ -152,6 +175,146 @@ class SessionLifecycleDispatcher:
         if termination_result is not None:
             return {**polled, "termination_action": termination_result}
         return polled
+
+    # ---- orphan session loop -----------------------------------------------
+    def _orphan_batch_size(self) -> int:
+        """Bound open-orphan processing per recovery round from the policy."""
+        policy = getattr(self, "scheduling_policy", None)
+        value = (
+            getattr(policy, "orphan_batch_size", None) if policy is not None else None
+        )
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return 10
+
+    def _orphan_ttl_seconds(self) -> int:
+        """Return the orphan Time-To-Live, falling back to a safe default."""
+        policy = getattr(self, "scheduling_policy", None)
+        value = (
+            getattr(policy, "orphan_ttl_seconds", None) if policy is not None else None
+        )
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return 604800
+
+    def _reconcile_open_orphans(self, *, now: datetime | None = None) -> int:
+        """Observe and recover at most ``orphan_batch_size`` open orphans."""
+        current = now or datetime.now().astimezone()
+        list_open = getattr(self.middleware, "list_orphan_sessions", None)
+        if not callable(list_open):
+            return 0
+        try:
+            open_orphans = [
+                item
+                for item in list_open("open")
+                if isinstance(item, dict) and item.get("status") == "open"
+            ]
+        except Exception:
+            return 0
+        processed = 0
+        for orphan in open_orphans[: self._orphan_batch_size()]:
+            if self._reconcile_one_orphan(orphan, current):
+                processed += 1
+        return processed
+
+    def _reconcile_one_orphan(self, orphan: Mapping[str, Any], now: datetime) -> bool:
+        get_orphan = getattr(self.middleware, "get_orphan_session", None)
+        update = getattr(self.middleware, "update_orphan_session", None)
+        if not callable(get_orphan) or not callable(update):
+            return False
+        orphan_id = str(orphan["orphan_id"])
+        try:
+            latest = get_orphan(orphan_id)
+        except Exception:
+            return False
+        if not isinstance(latest, dict) or latest.get("status") != "open":
+            return False
+        meta = dict(latest.get("metadata") or {})
+        since_dt = _parse_timestamp(meta.get("orphan_since") or latest.get("created_at"))
+        kill_dt = _parse_timestamp(meta.get("kill_at"))
+        ttl_passed = since_dt is not None and now >= since_dt + timedelta(
+            seconds=self._orphan_ttl_seconds()
+        )
+
+        observation = self._observe_orphan(latest)
+        if observation == "absent":
+            meta["closed_at"] = _orphan_timestamp(now)
+            update(orphan_id, status="closed", metadata=meta, now=now)
+            return True
+        if ttl_passed:
+            meta["terminate_status"] = "expired"
+            meta["closed_at"] = _orphan_timestamp(now)
+            update(orphan_id, status="closed", metadata=meta, now=now)
+            return True
+        if observation == "running":
+            if kill_dt is None or now < kill_dt:
+                meta["last_observed_status"] = "running"
+                meta["last_observed_at"] = _orphan_timestamp(now)
+                update(orphan_id, status="open", metadata=meta, now=now)
+                return True
+            return self._terminate_orphan(latest, meta, now)
+        if observation == "completed":
+            meta["last_observed_status"] = "completed"
+            meta["last_observed_at"] = _orphan_timestamp(now)
+            update(orphan_id, status="open", metadata=meta, now=now)
+            return True
+        # unreachable / indeterminate -> leave the orphan open for a later round.
+        return False
+
+    def _observe_orphan(self, orphan: Mapping[str, Any]) -> str | None:
+        get_attempt = getattr(self.middleware, "get_attempt", None)
+        if not callable(get_attempt):
+            return None
+        try:
+            attempt = get_attempt(str(orphan.get("attempt_id") or ""))
+        except Exception:
+            return None
+        if not isinstance(attempt, dict):
+            return None
+        plan = attempt.get("execution_plan")
+        allocation = attempt.get("allocation")
+        session_ref = orphan.get("session_ref")
+        if plan is None or allocation is None or not session_ref:
+            return None
+        resume = getattr(self.worker, "resume_session", None)
+        observe = getattr(self.worker, "observe_session", None)
+        if not callable(resume) or not callable(observe):
+            return None
+        try:
+            resume(plan, allocation, session_ref)
+            return normalize_session_observation(observe(session_ref))
+        except Exception:
+            return None
+
+    def _terminate_orphan(
+        self, latest: Mapping[str, Any], meta: dict[str, Any], now: datetime
+    ) -> bool:
+        orphan_id = str(latest["orphan_id"])
+        session_ref = latest.get("session_ref")
+        terminate = getattr(self.worker, "terminate_session", None)
+        meta["terminate_attempts"] = int(meta.get("terminate_attempts", 0) or 0) + 1
+        meta["last_terminate_at"] = _orphan_timestamp(now)
+        update = getattr(self.middleware, "update_orphan_session", None)
+        if not callable(update):
+            return True
+        if not callable(terminate):
+            meta["terminate_status"] = "unavailable"
+            update(orphan_id, status="open", metadata=meta, now=now)
+            return True
+        try:
+            outcome = normalize_session_termination(terminate(session_ref))
+        except Exception:
+            meta["terminate_status"] = "requested"
+            update(orphan_id, status="open", metadata=meta, now=now)
+            return True
+        if outcome in {"terminated", "absent"}:
+            meta["terminate_status"] = "confirmed"
+            meta["closed_at"] = _orphan_timestamp(now)
+            update(orphan_id, status="closed", metadata=meta, now=now)
+        else:
+            meta["terminate_status"] = "requested"
+            update(orphan_id, status="open", metadata=meta, now=now)
+        return True
 
     def poll_once(
         self, attempt_id: str, *, now: datetime | None = None

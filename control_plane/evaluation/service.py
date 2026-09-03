@@ -778,6 +778,20 @@ class EvaluationMiddleware:
         return self._repository.update_termination_state(
             attempt_id, termination_state, now=now
         )
+
+    def list_orphan_sessions(self, status: str | None = None) -> list[dict[str, Any]]:
+        return self._repository.list_orphan_sessions(status)
+
+    def get_orphan_session(self, orphan_id: str) -> dict[str, Any]:
+        return self._repository.get_orphan_session(orphan_id)
+
+    def update_orphan_session(
+        self, orphan_id: str, *, status: str,
+        metadata: Mapping[str, Any] | None = None, now: datetime | None = None,
+    ) -> dict[str, Any]:
+        return self._repository.update_orphan_session(
+            orphan_id, status=status, metadata=metadata, now=now
+        )
     def heartbeat(
         self,
         attempt_id: str,

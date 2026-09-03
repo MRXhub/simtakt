@@ -1330,6 +1330,63 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(self.repository.list_evaluations(origin="no-such-origin"), [])
 
+    def test_orphan_loop_recovers_open_orphans_by_kill_at(self) -> None:
+        class FakeWorker:
+            def __init__(self, observe: str = "running", terminate: str = "terminated"):
+                self.observe = observe
+                self.terminate = terminate
+                self.terminate_calls = 0
+            def resume_session(self, plan, allocation, session_ref):
+                return None
+            def observe_session(self, session_ref):
+                return self.observe
+            def terminate_session(self, session_ref):
+                self.terminate_calls += 1
+                return self.terminate
+
+        # 1) running before kill_at -> not killed; kept open, last_observed running.
+        attempt = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+        worker = FakeWorker(observe="running", terminate="terminated")
+        self.repository.record_orphan_session(
+            attempt_id=attempt["attempt_id"], reason="orphan-loop",
+            metadata={"kill_at": (BASE_TIME + timedelta(seconds=100)).isoformat()},
+            now=BASE_TIME,
+        )
+        dispatcher = SessionLifecycleDispatcher(
+            EvaluationMiddleware(self.repository), mock.Mock(), worker,
+            dispatcher_id="dispatcher:orphan", lease_seconds=30,
+        )
+        dispatcher.recover_once(now=BASE_TIME)
+        orphan = self.repository.list_orphan_sessions("open")[0]
+        self.assertEqual(orphan["metadata"]["last_observed_status"], "running")
+        self.assertEqual(worker.terminate_calls, 0)
+
+        # 2) running at/after kill_at -> terminate -> confirmed and closed.
+        dispatcher.recover_once(now=BASE_TIME + timedelta(seconds=150))
+        self.assertEqual(worker.terminate_calls, 1)
+        closed = self.repository.list_orphan_sessions("closed")
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0]["metadata"]["terminate_status"], "confirmed")
+        self.assertIn("closed_at", closed[0]["metadata"])
+
+        # 3) absent observation -> orphan closed without any termination.
+        second = self.lease(
+            self.prepare(self.submit(), window_limit=2), now=BASE_TIME
+        )
+        absent_worker = FakeWorker(observe="absent", terminate="terminated")
+        self.repository.record_orphan_session(
+            attempt_id=second["attempt_id"], reason="orphan-absent",
+            metadata={"kill_at": (BASE_TIME + timedelta(seconds=100)).isoformat()},
+            now=BASE_TIME,
+        )
+        SessionLifecycleDispatcher(
+            EvaluationMiddleware(self.repository), mock.Mock(), absent_worker,
+            dispatcher_id="dispatcher:orphan-absent", lease_seconds=30,
+        ).recover_once(now=BASE_TIME)
+        closed2 = self.repository.list_orphan_sessions("closed")
+        self.assertEqual(len(closed2), 2)
+        self.assertEqual(absent_worker.terminate_calls, 0)
+
     def test_v14_to_v15_migration_adds_origin_and_preserves_bookkeeping(self) -> None:
         # Simulate a v14 database by removing the v15 origin column and ledger row,
         # and recording the 12..14 upgrade ledger like a real v14 database carries.
