@@ -271,6 +271,8 @@ class DemoMiddleware:
 
     def stale_reconciling_attempts(self, _stale_seconds: int = 3600) -> list[Any]:
         return []
+    def list_orphan_sessions(self, status: str | None = None) -> list[dict[str, Any]]:
+        return []
 
     def task_shape_statistics(self) -> list[dict[str, Any]]:
         return [{"task_shape": "demo-task", "count": 1}]
@@ -554,6 +556,10 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
             topology = self.server.topology or parse_execution_topology(self.server.project_root)
             policy = self.server.policy or resolve_governed_scheduling_policy(self.server.project_root)
             return status_views.capacity_status(self.server.middleware, topology, policy)
+        if path == "/api/attempts/orphans":
+            params = urllib.parse.parse_qs(query, keep_blank_values=True)
+            status = params.get("status", [None])[0]
+            return {"items": self.server.middleware.list_orphan_sessions(status)}
         if path == "/api/shapes":
             return status_views.shape_stats(self.server.middleware)
         if path == "/api/overview":
