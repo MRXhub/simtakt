@@ -61,6 +61,13 @@ _HEARTBEATABLE_ATTEMPT_STATES_SQL = attempt_states_sql(HEARTBEATABLE_ATTEMPT_STA
 
 
 SCHEMA_VERSION = 18
+# Evaluation states that can still be settled by a late harvest of a lost
+# Attempt's still-running session.  Already-qualifying/qualified and other
+# settled states are excluded so the harvest CAS never double-settles an
+# Evaluation that another Attempt is already resolving.
+_HARVESTABLE_EVALUATION_STATES = frozenset(
+    {"requested", "deduplicating", "queued", "running", "recovering"}
+)
 _SHA256_REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -5226,6 +5233,160 @@ class SQLiteEvaluationRepository:
             )
         return self.get_orphan_session(orphan_id)
 
+    def complete_orphan_attempt(
+        self,
+        attempt_id: str,
+        worker_id: str,
+        artifact_ids: Sequence[str],
+        *,
+        feedback: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Atomically settle one lost Attempt whose session was late-harvested.
+
+        Everything runs inside a single ``BEGIN IMMEDIATE`` transaction that
+        doubles as the evaluation-status CAS.  When the Evaluation is still
+        harvestable the Attempt transitions ``lost`` -> ``completed`` with a
+        ``late-harvest`` state event and the Evaluation moves to ``qualifying``
+        while its open orphan is recorded ``harvested`` and closed.  When the
+        Evaluation is already resolved (another Attempt won the qualification
+        race) no Attempt/Evaluation status changes; only a
+        ``discarded_duplicate`` Attempt state event is appended and the orphan
+        is recorded ``discarded`` and closed.
+        """
+        attempt_id = str(attempt_id).strip()
+        if not attempt_id:
+            raise RepositoryError("orphan harvest requires an attempt_id")
+        raw_artifacts = [str(item).strip() for item in artifact_ids]
+        artifacts = sorted(raw_artifacts)
+        if (
+            not artifacts
+            or any(not item for item in artifacts)
+            or len(artifacts) != len(set(artifacts))
+        ):
+            raise RepositoryError("harvested Attempt requires evidence artifact IDs")
+        timestamp = _iso(_utc_now() if now is None else now)
+        with self._transaction() as connection:
+            attempt_row = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if attempt_row is None:
+                raise RepositoryError(f"unknown Attempt: {attempt_id}")
+            if not attempt_row["session_ref"]:
+                raise RepositoryError("orphan harvest requires a bound session")
+            orphan_row = connection.execute(
+                "SELECT * FROM orphan_sessions WHERE attempt_id = ?", (attempt_id,)
+            ).fetchone()
+            if orphan_row is None:
+                raise RepositoryError(
+                    "orphan harvest requires a recorded orphan session"
+                )
+            orphan_id = str(orphan_row["orphan_id"])
+            evaluation_id = str(attempt_row["evaluation_id"])
+            evaluation = connection.execute(
+                "SELECT status FROM evaluations WHERE evaluation_id = ?",
+                (evaluation_id,),
+            ).fetchone()
+            if evaluation is None:
+                raise RepositoryError(f"unknown Evaluation: {evaluation_id}")
+            current_eval = str(evaluation["status"])
+            meta = dict(_safe_json_object(orphan_row["metadata_json"]) or {})
+            meta["closed_at"] = timestamp
+            meta["worker_id"] = str(worker_id)
+            if (
+                current_eval in _HARVESTABLE_EVALUATION_STATES
+                and str(attempt_row["status"]) == "lost"
+            ):
+                connection.execute(
+                    """
+                    UPDATE attempts
+                    SET artifact_ids_json = ?, failure_class = NULL, updated_at = ?
+                    WHERE attempt_id = ?
+                    """,
+                    (canonical_json(artifacts), timestamp, attempt_id),
+                )
+                self._transition_attempt(
+                    connection,
+                    attempt_id=attempt_id,
+                    expected=("lost",),
+                    target="completed",
+                    event_type="AttemptCompleted",
+                    payload={
+                        "reason": "late-harvest",
+                        "artifact_ids": artifacts,
+                        "orphan_id": orphan_id,
+                        "worker_id": str(worker_id),
+                    },
+                    created_at=timestamp,
+                )
+                self._transition_evaluation(
+                    connection,
+                    evaluation_id=evaluation_id,
+                    expected=(current_eval,),
+                    target="qualifying",
+                    event_type="QualificationStarted",
+                    payload={"attempt_id": attempt_id},
+                    created_at=timestamp,
+                )
+                if feedback is not None:
+                    if (
+                        not isinstance(feedback, Mapping)
+                        or not bool(feedback.get("success"))
+                    ):
+                        raise RepositoryError(
+                            "harvested Attempt feedback must be successful"
+                        )
+                    self._record_attempt_feedback_in_transaction(
+                        connection, attempt_id, attempt_row, feedback, timestamp
+                    )
+                meta["harvest_status"] = "harvested"
+                meta["artifact_ids"] = artifacts
+                connection.execute(
+                    "UPDATE orphan_sessions SET status='closed', harvest_status='harvested', "
+                    "metadata_json=?, updated_at=? WHERE orphan_id=?",
+                    (canonical_json(meta), timestamp, orphan_id),
+                )
+                attempt = self.get_attempt(attempt_id, connection=connection)
+                harvest_status = "harvested"
+            else:
+                self._state_event(
+                    connection,
+                    aggregate_type="attempt",
+                    aggregate_id=attempt_id,
+                    from_status=str(attempt_row["status"]),
+                    to_status=str(attempt_row["status"]),
+                    event_type="AttemptDiscardedDuplicate",
+                    payload={
+                        "reason": "discarded_duplicate",
+                        "artifact_ids": artifacts,
+                        "orphan_id": orphan_id,
+                        "evaluation_id": evaluation_id,
+                        "worker_id": str(worker_id),
+                    },
+                    created_at=timestamp,
+                )
+                meta["harvest_status"] = "discarded"
+                meta["artifact_ids"] = artifacts
+                connection.execute(
+                    "UPDATE orphan_sessions SET status='closed', harvest_status='discarded', "
+                    "metadata_json=?, updated_at=? WHERE orphan_id=?",
+                    (canonical_json(meta), timestamp, orphan_id),
+                )
+                attempt = self.get_attempt(attempt_id, connection=connection)
+                harvest_status = "discarded"
+            evaluation_result = self.get_evaluation(
+                evaluation_id, connection=connection
+            )
+        orphan = self.get_orphan_session(orphan_id)
+        return {
+            "attempt_id": attempt_id,
+            "orphan_id": orphan_id,
+            "harvest_status": harvest_status,
+            "attempt": attempt,
+            "orphan": orphan,
+            "evaluation": evaluation_result,
+        }
+
     def _orphan_record(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
             "orphan_id": str(row["orphan_id"]),
@@ -5234,6 +5395,7 @@ class SQLiteEvaluationRepository:
             "session_ref": str(row["session_ref"]),
             "reason": str(row["reason"]),
             "status": str(row["status"]),
+            "harvest_status": row["harvest_status"],
             "metadata": _safe_json_object(row["metadata_json"]) or {},
             "created_at": str(row["created_at"]),
             "updated_at": str(row["updated_at"]),
