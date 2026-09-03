@@ -892,6 +892,60 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
             second["checkpoint_parent_attempt_id"], first["attempt_id"]
         )
 
+    def test_dispatch_defers_evaluation_with_running_open_orphan(self) -> None:
+        mw = self.middleware
+        repo = mw._repository
+        now = datetime.now(timezone.utc)
+        # First attempt runs (bound + confirmed) before the controller loses it.
+        first = self.prepare()
+        prep, opt, plan, alloc = self.claim_materials(first, session_ref="session-defer")
+        claimed = mw.claim_prepared_execution(
+            first["attempt_id"], "dispatcher:fixture", 120,
+            preparation_id=prep["preparation_id"], selected_option_id=opt["option_id"],
+            session_plan=plan, allocation=alloc,
+        )
+        self.assertIsNotNone(claimed)
+        mw.confirm_attempt_start(first["attempt_id"], "dispatcher:fixture")
+        # The controller lost track but the session still runs elsewhere: record
+        # an open orphan and mark it observed running, with kill_at far ahead.
+        repo.record_orphan_session(
+            attempt_id=first["attempt_id"], reason="lost-controller",
+            metadata={"kill_at": (now + timedelta(seconds=3600)).isoformat()},
+            now=now,
+        )
+        orphan = repo.list_orphan_sessions("open")[0]
+        repo.update_orphan_session(
+            orphan["orphan_id"], status="open",
+            metadata={**orphan["metadata"], "last_observed_status": "running"},
+            now=now,
+        )
+        # Free the evaluation so a fresh (second) attempt can be prepared.
+        mw.fail_attempt(first["attempt_id"], "dispatcher:fixture", "solver-crash")
+        mw.plan_recovery(self.evaluation["evaluation_id"], "retry after orphan")
+        mw.auto_requeue_recovering(now=now)
+        second = self.prepare()
+        self.assertNotEqual(second["attempt_id"], first["attempt_id"])
+        dispatcher = self.dispatcher(FakeResourceMonitor())
+        open_now = repo.list_orphan_sessions("open")
+        self.assertTrue(open_now)
+        self.assertEqual(open_now[0]["metadata"].get("last_observed_status"), "running")
+        self.assertEqual(second["evaluation_id"], open_now[0]["evaluation_id"])
+        self.assertIn(
+            second["evaluation_id"], dispatcher._orphan_deferred_evaluation_ids(now)
+        )
+        # While the running orphan is not yet killable, the evaluation is deferred.
+        self.assertEqual(dispatcher.dispatch_once(now=now), [])
+        self.assertIsNone(mw.get_attempt(second["attempt_id"])["allocation"])
+        # After the orphan closes, the same evaluation is claimed this round.
+        repo.update_orphan_session(
+            orphan["orphan_id"], status="closed",
+            metadata={**orphan["metadata"], "closed_at": now.isoformat()},
+            now=now,
+        )
+        launched = dispatcher.dispatch_once(now=now)
+        self.assertTrue(launched)
+        self.assertEqual(mw.get_attempt(second["attempt_id"])["status"], "running")
+
     def test_wait_does_not_materialize_plan_or_allocate(self) -> None:
         prepared = self.prepare(processors=2)
         worker = RecordingWorker(self.root)

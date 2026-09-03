@@ -422,6 +422,63 @@ class PreparedExecutionDispatcher(SessionLifecycleDispatcher):
         *,
         now: datetime,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        # An Evaluation whose session is orphaned but still observed running
+        # (and not yet past its kill_at) must not be claimed again this round.
+        # Deferring only skips the round: no Attempt transition is performed.
+        deferred = self._orphan_deferred_evaluation_ids(now)
+        eligible_attempts: list[dict[str, Any]] = []
+        candidates: list[dict[str, Any]] = []
+        for attempt in attempts:
+            if attempt.get("evaluation_id") in deferred:
+                continue
+            try:
+                candidate = self._prepared_candidate(attempt, now=now)
+            except (ExecutionOptionError, ComputeProfileError, GovernedPreparationError, DispatchError) as exc:
+                self._retire_rejected_preparation(attempt, now=now, error=exc)
+                continue
+            eligible_attempts.append(attempt)
+            candidates.append(candidate)
+        return eligible_attempts, candidates
+
+    def _orphan_deferred_evaluation_ids(
+        self, now: datetime
+    ) -> set[str]:
+        """Return evaluation ids carrying an open orphan still running and not killable.
+
+        Such evaluations keep a real session executing elsewhere, so starting a
+        new Attempt for them would double-run the work.  The set is empty when
+        the middleware exposes no orphan listing.
+        """
+        list_open = getattr(self.middleware, "list_orphan_sessions", None)
+        if not callable(list_open):
+            return set()
+        deferred: set[str] = set()
+        try:
+            open_orphans = list_open("open")
+        except Exception:
+            return deferred
+        for orphan in open_orphans:
+            if not isinstance(orphan, dict):
+                continue
+            meta = orphan.get("metadata") or {}
+            if meta.get("last_observed_status") != "running":
+                continue
+            kill_at = self._parse_orphan_timestamp(meta.get("kill_at"))
+            if kill_at is None or now < kill_at:
+                deferred.add(orphan.get("evaluation_id"))
+        return deferred
+
+    @staticmethod
+    def _parse_orphan_timestamp(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value if value.tzinfo is not None else None
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                return None
+            return parsed if parsed.tzinfo is not None else None
+        return None
         eligible_attempts: list[dict[str, Any]] = []
         candidates: list[dict[str, Any]] = []
         for attempt in attempts:
