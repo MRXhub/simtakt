@@ -5325,6 +5325,46 @@ class SQLiteEvaluationRepository:
             )
         return self.get_orphan_session(orphan_id)
 
+    def record_orphan_state_event(
+        self,
+        orphan_id: str,
+        *,
+        event_type: str,
+        from_status: str | None = None,
+        to_status: str,
+        payload: Mapping[str, Any],
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Append an Orphan state event to the orphan aggregate ledger.
+
+        The dispatcher uses this to surface orphan lifecycle facts (a terminal
+        close or an observe failure) without inventing Attempt/Evaluation
+        history.
+        """
+        current = _utc_now() if now is None else now
+        if current.tzinfo is None:
+            raise RepositoryError("timestamps must be timezone-aware")
+        normalized = normalize_token(event_type, "event_type")
+        timestamp = _iso(current)
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT orphan_id FROM orphan_sessions WHERE orphan_id = ?",
+                (orphan_id,),
+            ).fetchone()
+            if row is None:
+                raise RepositoryError(f"unknown orphan session: {orphan_id}")
+            self._state_event(
+                connection,
+                aggregate_type="orphan",
+                aggregate_id=orphan_id,
+                from_status=from_status,
+                to_status=to_status,
+                event_type=normalized,
+                payload=dict(payload),
+                created_at=timestamp,
+            )
+        return self.get_orphan_session(orphan_id)
+
     def complete_orphan_attempt(
         self,
         attempt_id: str,
@@ -5460,7 +5500,8 @@ class SQLiteEvaluationRepository:
                 for dup in duplicate_rows:
                     dup_id = str(dup["attempt_id"])
                     dup_from = str(dup["status"])
-                    connection.execute(
+                    dup_termination_state = dup["termination_state"]
+                    updated = connection.execute(
                         """
                         UPDATE attempts
                         SET status = 'lost', termination_state = 'requested',
@@ -5471,21 +5512,46 @@ class SQLiteEvaluationRepository:
                         """,
                         (timestamp, dup_id),
                     )
-                    self._state_event(
-                        connection,
-                        aggregate_type="attempt",
-                        aggregate_id=dup_id,
-                        from_status=dup_from,
-                        to_status="lost",
-                        event_type="AttemptLost",
-                        payload={
-                            "reason": "late-harvest-winner",
-                            "source": "late-harvest",
-                            "superseded_by_attempt_id": attempt_id,
-                            "worker_id": str(worker_id),
-                        },
-                        created_at=timestamp,
-                    )
+                    if updated.rowcount == 1:
+                        self._state_event(
+                            connection,
+                            aggregate_type="attempt",
+                            aggregate_id=dup_id,
+                            from_status=dup_from,
+                            to_status="lost",
+                            event_type="AttemptLost",
+                            payload={
+                                "reason": "late-harvest-winner",
+                                "source": "late-harvest",
+                                "superseded_by_attempt_id": attempt_id,
+                                "worker_id": str(worker_id),
+                            },
+                            created_at=timestamp,
+                        )
+                    else:
+                        # The sibling was already settled (e.g. its termination
+                        # was confirmed elsewhere); do not overwrite it or claim
+                        # a new lost transition.  Record an informational event
+                        # carrying the sibling's current termination state.
+                        self._state_event(
+                            connection,
+                            aggregate_type="attempt",
+                            aggregate_id=dup_id,
+                            from_status=dup_from,
+                            to_status=dup_from,
+                            event_type="AttemptSiblingAlreadySettled",
+                            payload={
+                                "reason": "late-harvest-winner-sibling-settled",
+                                "source": "late-harvest",
+                                "superseded_by_attempt_id": attempt_id,
+                                "sibling_termination_state": (
+                                    None if dup_termination_state is None
+                                    else str(dup_termination_state)
+                                ),
+                                "worker_id": str(worker_id),
+                            },
+                            created_at=timestamp,
+                        )
                 attempt = self.get_attempt(attempt_id, connection=connection)
                 harvest_status = "harvested"
             else:

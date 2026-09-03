@@ -794,6 +794,25 @@ class EvaluationMiddleware:
         return self._repository.update_orphan_session(
             orphan_id, status=status, metadata=metadata, now=now
         )
+
+    def record_orphan_state_event(
+        self,
+        orphan_id: str,
+        *,
+        event_type: str,
+        from_status: str | None = None,
+        to_status: str,
+        payload: Mapping[str, Any],
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        return self._repository.record_orphan_state_event(
+            orphan_id,
+            event_type=event_type,
+            from_status=from_status,
+            to_status=to_status,
+            payload=payload,
+            now=now,
+        )
     def heartbeat(
         self,
         attempt_id: str,
