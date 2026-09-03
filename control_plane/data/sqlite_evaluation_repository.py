@@ -3344,6 +3344,11 @@ class SQLiteEvaluationRepository:
                         """
                     ).fetchone()[0]
                 )
+                active_count += int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM orphan_sessions WHERE status='open'"
+                    ).fetchone()[0]
+                )
                 if active_count >= license_sessions:
                     raise RepositoryError(
                         "license sessions exhausted: "
