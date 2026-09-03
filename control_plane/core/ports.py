@@ -13,7 +13,7 @@ from typing import Any, Protocol
 
 
 class ControlStore(Protocol):
-    """Read the governed project control state (PROJECT_STATE.json)."""
+    """Read project control-state files and expose their content revision hash."""
 
     def read_project_state(self, project_root: Path | str) -> Mapping[str, Any]: ...
 
