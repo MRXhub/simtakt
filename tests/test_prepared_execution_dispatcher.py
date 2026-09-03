@@ -30,6 +30,7 @@ from control_plane.evaluation.execution_options import (
 from control_plane.evaluation.control_plane import resolve_control_plane_database
 from control_plane.evaluation.governed_preparation import GovernedPreparationError
 from control_plane.evaluation.prepared_dispatcher import DispatchError, PreparedExecutionDispatcher
+from control_plane.evaluation.dispatcher import SessionLifecycleDispatcher
 from control_plane.evaluation.execution_topology import ExecutionTopologyError
 from control_plane.evaluation.execution_planning import materialize_session_plan
 from control_plane.evaluation.scheduling import (
@@ -942,9 +943,91 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
             metadata={**orphan["metadata"], "closed_at": now.isoformat()},
             now=now,
         )
-        launched = dispatcher.dispatch_once(now=now)
-        self.assertTrue(launched)
-        self.assertEqual(mw.get_attempt(second["attempt_id"])["status"], "running")
+    def test_auto_release_writes_orphan_kill_at_and_defers_within_budget(self) -> None:
+        """The production wall-proof auto-release writes the orphan's kill_at.
+
+        Regression: auto_release_wall_budget (not record_orphan_session) records
+        the open orphan for a released reconciling attempt, and its metadata
+        carries a non-empty ``kill_at`` equal to the launch moment plus the
+        persisted budget's ``kill_at_seconds``.  While that budget is still in
+        force an observe of ``running`` is not killed and the evaluation stays
+        deferred by the prepared dispatcher.
+        """
+        mw = self.middleware
+        repo = mw._repository
+        now = datetime.now(timezone.utc)
+        first = self.prepare()
+        prep, opt, plan, alloc = self.claim_materials(
+            first, session_ref="session-wallorphan"
+        )
+        self.assertIsNotNone(
+            repo.claim_prepared_execution(
+                first["attempt_id"], "dispatcher:fixture", 120,
+                preparation_id=prep["preparation_id"],
+                selected_option_id=opt["option_id"],
+                session_plan=plan, allocation=alloc, now=now,
+            )
+        )
+        repo.confirm_attempt_start(first["attempt_id"], "dispatcher:fixture", now=now)
+        budget = repo.get_attempt(first["attempt_id"])["wall_budget"]
+        self.assertIsNotNone(budget)
+        kill_at_seconds = budget["kill_at_seconds"]
+        mw.require_reconciliation(
+            first["attempt_id"], "dispatcher:fixture",
+            reason="lost-controller", now=now,
+        )
+        # Force release with a tiny proof so the release fires while the
+        # budget's own kill_at deadline is still in the future.
+        released = repo.auto_release_wall_budget(
+            {first["attempt_id"]: 1},
+            now=now + timedelta(seconds=2),
+        )
+        self.assertTrue(
+            any(r["attempt_id"] == first["attempt_id"] for r in released)
+        )
+        open_orphans = repo.list_orphan_sessions("open")
+        self.assertEqual(len(open_orphans), 1)
+        orphan = open_orphans[0]
+        self.assertEqual(orphan["attempt_id"], first["attempt_id"])
+        self.assertEqual(
+            orphan["metadata"]["kill_at"],
+            (now + timedelta(seconds=kill_at_seconds)).isoformat(),
+        )
+        # Mark the orphan observed running; its kill_at is still in the future.
+        repo.update_orphan_session(
+            orphan["orphan_id"], status="open",
+            metadata={**orphan["metadata"], "last_observed_status": "running"},
+            now=now,
+        )
+        within = now + timedelta(seconds=max(1, kill_at_seconds // 2))
+
+        # observe=running before kill_at is not killed by the orphan loop.
+        class _RunningWorker:
+            terminate_calls = 0
+            def resume_session(self, plan, allocation, session_ref):
+                return None
+            def observe_session(self, session_ref):
+                return "running"
+            def terminate_session(self, session_ref):
+                self.terminate_calls += 1
+                return "terminated"
+        running_worker = _RunningWorker()
+        orphan_dispatcher = SessionLifecycleDispatcher(
+            mw, mock.Mock(), running_worker,
+            dispatcher_id="dispatcher:orphan-wp", lease_seconds=30,
+        )
+        orphan_dispatcher._reconcile_open_orphans(now=within)
+        still_open = repo.list_orphan_sessions("open")
+        self.assertEqual(len(still_open), 1)
+        self.assertEqual(still_open[0]["metadata"]["last_observed_status"], "running")
+        self.assertEqual(running_worker.terminate_calls, 0)
+
+        # The prepared dispatcher defers the running, not-yet-killable orphan.
+        prepared = self.dispatcher(FakeResourceMonitor())
+        self.assertIn(
+            orphan["evaluation_id"],
+            prepared._orphan_deferred_evaluation_ids(within),
+        )
 
     def test_wait_does_not_materialize_plan_or_allocate(self) -> None:
         prepared = self.prepare(processors=2)

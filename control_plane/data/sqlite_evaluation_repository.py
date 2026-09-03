@@ -2867,6 +2867,24 @@ class SQLiteEvaluationRepository:
                     "claimed_at": str(claim_event["created_at"]),
                     "age_seconds": age,
                 }
+                orphan_payload = payload
+                kill_at_seconds = None
+                if isinstance(persisted_budget, Mapping):
+                    stored_kill_at = persisted_budget.get("kill_at_seconds")
+                    if (
+                        isinstance(stored_kill_at, int)
+                        and not isinstance(stored_kill_at, bool)
+                        and stored_kill_at >= 1
+                    ):
+                        kill_at_seconds = stored_kill_at
+                if kill_at_seconds is not None and claimed.tzinfo is not None:
+                    orphan_payload = {
+                        **payload,
+                        "kill_at": (
+                            claimed.astimezone(timezone.utc)
+                            + timedelta(seconds=kill_at_seconds)
+                        ).isoformat(),
+                    }
                 self._mark_attempt_lost_in_transaction(
                     connection,
                     row,
@@ -2883,7 +2901,7 @@ class SQLiteEvaluationRepository:
                         (
                             str(uuid.uuid4()), attempt_id, row["evaluation_id"],
                             row["session_ref"], "wall-budget-elapsed",
-                            canonical_json(payload), timestamp, timestamp, None,
+                            canonical_json(orphan_payload), timestamp, timestamp, None,
                         ),
                     )
                 records.append(
