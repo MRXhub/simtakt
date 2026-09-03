@@ -11,7 +11,7 @@
 import { t, fmtClockTime } from "../i18n.js";
 import { state } from "../state.js";
 import { el, txt, pageHead, entityPicker } from "../ui.js";
-import { postJSON } from "../api.js";
+import { postJSON, fetchJSON } from "../api.js";
 import { navigate } from "../router.js";
 
 // Stage sub-view imports
@@ -185,6 +185,11 @@ export async function renderCompose({ initialStep = 1, detailId = null, detailTy
       return;
     }
 
+    const sRes = await fetchJSON("/api/schemas");
+    if (sRes && sRes.ok && sRes.data) {
+      state.schemasList = sRes.data.items || sRes.data.schemas || (Array.isArray(sRes.data) ? sRes.data : []);
+    }
+
     const wrap = el("div", "stage-content-wrap");
 
     // Collapsible Swiss Field Guide
@@ -210,7 +215,7 @@ export async function renderCompose({ initialStep = 1, detailId = null, detailTy
     pidField.appendChild(pidIn);
     r1.appendChild(pidField);
 
-    const activeSchemaRev = state.schemaDraft.registeredRevision || state.packagesSchemaRev || state.candidateDesigner.schemaRev || "sha256:mock-schema-ten-junction-v1";
+    const activeSchemaRev = state.schemaDraft.registeredRevision || state.packagesSchemaRev || (state.schemasList[0] && (state.schemasList[0].revision || state.schemasList[0])) || state.candidateDesigner.schemaRev || "sha256:mock-schema-ten-junction-v1";
     const schemaPicker = entityPicker({
       label: t("fieldParamSchemaRev"),
       id: "p-param",
@@ -362,6 +367,11 @@ export async function renderCompose({ initialStep = 1, detailId = null, detailTy
       return;
     }
 
+    const pRes = await fetchJSON("/api/problems");
+    if (pRes && pRes.ok && pRes.data) {
+      state.problemsList = pRes.data.items || pRes.data.problems || (Array.isArray(pRes.data) ? pRes.data : []);
+    }
+
     const wrap = el("div", "stage-content-wrap");
 
     // Collapsible Swiss Field Guide
@@ -387,10 +397,11 @@ export async function renderCompose({ initialStep = 1, detailId = null, detailTy
     sField.appendChild(sIn);
     r1.appendChild(sField);
 
+    const activeProblemId = state.candidateDesigner.problemId || (state.problemsList[0] && (state.problemsList[0].problem_id || state.problemsList[0])) || "demo-problem";
     const probPicker = entityPicker({
       label: t("fieldProblemId"),
       id: "s-problem",
-      value: state.candidateDesigner.problemId || "demo-problem",
+      value: activeProblemId,
       items: state.problemsList,
       itemToOption: (p) => ({ value: p.problem_id || p, label: p.problem_id || p, sub: p.problem_revision || p.revision }),
       onSelect: (val) => {
@@ -407,7 +418,7 @@ export async function renderCompose({ initialStep = 1, detailId = null, detailTy
     r1.appendChild(probPicker.node);
     createCard.appendChild(r1);
 
-    const matchedProblem = state.problemsList.find(p => p.problem_id === (state.candidateDesigner.problemId || "demo-problem"));
+    const matchedProblem = state.problemsList.find(p => p.problem_id === activeProblemId);
     const initialProbRev = (matchedProblem && (matchedProblem.problem_revision || matchedProblem.revision)) || state.candidateDesigner.problemRev || DEFAULT_SHA256_2;
 
     const r2 = el("div", "form-row");
