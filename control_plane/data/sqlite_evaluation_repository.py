@@ -4619,7 +4619,7 @@ class SQLiteEvaluationRepository:
             self._transition_evaluation(
                 connection,
                 evaluation_id=evaluation_id,
-                expected=("recovering",),
+                expected=("recovering", "qualifying"),
                 target="unresolved",
                 event_type="EvaluationUnresolved",
                 payload={"reason": explanation},
