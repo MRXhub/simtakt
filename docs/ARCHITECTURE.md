@@ -260,20 +260,22 @@ accepts these optional fields; the defaults are applied when a field is absent:
 
 ### Not implemented / pending
 
-1. **Learned budgets are not yet wired into dispatch.**  `resolve_wall_budget`
-   is implemented and unit/integration tested, but no production dispatch or
-   claim path calls it yet: launch confirmation still persists a
-   declared-source budget, so the learned/source-degraded/widened values do not
-   currently drive a running attempt's proof.
-2. **`orphans_hold_license` is not yet consulted.**  The policy flag is parsed,
-   validated, and exposed, but the atomic claim counts open orphans
-   unconditionally; the flag does not yet gate that count.
-3. **`kill_at` is not written by any production path.**  Kill-at-based
-   termination and the defer-dispatch rule both require orphan metadata carrying
-   a future `kill_at`, but only tests and external callers supply it; production
-   wall-proof orphans carry no `kill_at`, so those branches are not exercised by
-   the wall-budget-elapsed path (TTL expiry and worker-observed completion /
-   absence remain the effective recovery).
+1. **Progress (stall) probe.**  `stall_seconds` is computed and persisted with
+   every attempt's wall budget, but no adapter-side method feeds it: zombie
+   detection is wall-time only.  A progress signal is software-specific
+   (output-file mtime, solver log timestamps, scheduler accounting), so it will
+   be an optional adapter method probed with `getattr`, like
+   `terminate_session`; the contract is not yet fixed.
+2. **Target normalisation of learned budgets.**  Samples are keyed by
+   `(problem_revision, fidelity, target)` and degrade to coarser keys when
+   sparse; there is no cross-target speed normalisation.  Planned direction: an
+   operator-declared per-target baseline plus a selectable estimation mode.
+
+Earlier drafts of this section listed three wiring gaps (learned budget not
+called at launch, `orphans_hold_license` not consulted, production orphans
+without `kill_at`).  All three are closed: `confirm_attempt_start` calls
+`resolve_wall_budget`, the atomic claim honours the flag, and auto-release
+writes `kill_at` from the persisted budget.
 
 ## Deployment guards
 
