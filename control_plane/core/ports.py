@@ -84,19 +84,9 @@ class ResourceMonitor(Protocol):
         """
         ...
 
-
-class ProjectMaterializer(Protocol):
-    """Materialize a validated task/project execution input."""
-
-    def materialize(
-        self, project_root: Path | str, task: Mapping[str, Any], **kwargs: Any
-    ) -> Mapping[str, Any]: ...
-
-
 __all__ = [
     "ControlStore",
     "ArtifactStore",
     "TargetCatalog",
     "ResourceMonitor",
-    "ProjectMaterializer",
 ]

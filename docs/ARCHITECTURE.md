@@ -21,16 +21,15 @@ The control plane is organized into layers with explicit boundaries:
 Each layer depends on interfaces rather than a host project's directory layout;
 applications compose concrete implementations at their boundary.
 
-## The five ports
+## The four ports
 
-The `control_plane.core.ports` module defines five replaceable ports:
+The `control_plane.core.ports` module defines four replaceable ports:
 
 1. **ControlStore** reads governed project control state.
 2. **ArtifactStore** resolves registered artifacts by stable identity.
 3. **TargetCatalog** reads the available execution-target catalog.
 4. **ResourceMonitor** supplies a locked, read-only resource snapshot for a
    scheduling decision.
-5. **ProjectMaterializer** materializes a validated task into an execution input.
 
 To replace an implementation, provide an object satisfying the corresponding
 Python protocol, construct it in the application composition root, and inject it
@@ -68,10 +67,10 @@ vendor APIs while allowing adapters to be replaced or upgraded independently.
 
 The demo uses the same composition boundaries as a deployed application with
 small in-process components: file-backed control and artifact stores, a target
-catalog, a deterministic resource monitor, and a project materializer feed the
-evaluation service. A lightweight simulation worker and gateway emulate session
-launch, observation, recovery, and receipt publication. The read-only web status
-server reads the resulting projections and serves the static status page.
+catalog, and a deterministic resource monitor feed the evaluation service. A
+lightweight simulation worker and gateway emulate session launch, observation,
+recovery, and receipt publication. The read-only web status server reads the
+resulting projections and serves the static status page.
 
 Demo mode is intentionally deterministic and local. It exercises the control
 flow and protocol wiring without requiring an external simulator, remote host,

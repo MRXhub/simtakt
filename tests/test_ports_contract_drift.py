@@ -10,7 +10,6 @@ from typing import Any
 from control_plane.core.ports import (
     ArtifactStore,
     ControlStore,
-    ProjectMaterializer,
     ResourceMonitor,
     TargetCatalog,
 )
@@ -131,7 +130,6 @@ class PortsContractDriftTests(unittest.TestCase):
             "ArtifactStore",
             "TargetCatalog",
             "ResourceMonitor",
-            "ProjectMaterializer",
         }
         self.assertEqual(set(ports.__all__), expected_exports)
 

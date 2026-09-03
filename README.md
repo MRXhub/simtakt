@@ -62,10 +62,10 @@ local jobs — see [examples/basic-local/README.md](examples/basic-local/README.
 
 ## Design notes
 
-The five ports in `control_plane/core/ports.py` (`ControlStore`,
-`ArtifactStore`, `TargetCatalog`, `ResourceMonitor`, `ProjectMaterializer`)
-isolate the control plane from any host project's file layout. File-based
-reference implementations are provided; swap them for your own storage.
+The four ports in `control_plane/core/ports.py` (`ControlStore`,
+`ArtifactStore`, `TargetCatalog`, `ResourceMonitor`) isolate the control plane
+from any host project's file layout. File-based reference implementations are
+provided; swap them for your own storage.
 
 Concrete simulator adapters (e.g. for commercial TCAD or multiphysics tools) are
 intentionally **not** part of this core: implement the worker and gateway protocols and
