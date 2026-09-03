@@ -3,3 +3,4 @@ examples/**/project/*.json -text
 examples/**/records/**/*.json -text
 examples/**/config/*.json -text
 project/*.json -text
+*.md -text
