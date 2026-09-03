@@ -2683,6 +2683,7 @@ class SQLiteEvaluationRepository:
                         "claimed_at": None if claim_event is None else str(claim_event["created_at"]),
                     }
                 )
+        return candidates
     def has_reconciling_attempts_for_wall_proof(self) -> bool:
         """Cheap read-only hint for whether wall-budget recovery may apply."""
         with closing(self._connect()) as connection:
@@ -2737,20 +2738,33 @@ class SQLiteEvaluationRepository:
             for row in rows:
                 attempt_id = str(row["attempt_id"])
                 persisted_budget = None
-                for budget_source in (
-                    row["execution_preparation_json"],
-                    row["execution_plan_json"],
+                for budget_source, nested in (
+                    (row["wall_budget_json"], False),
+                    (row["execution_preparation_json"], True),
+                    (row["execution_plan_json"], True),
                 ):
                     decoded = (
                         None if budget_source is None else _safe_json_object(budget_source)
                     )
-                    if isinstance(decoded, Mapping) and isinstance(decoded.get("budget"), Mapping):
-                        persisted_budget = decoded["budget"]
+                    if nested:
+                        if isinstance(decoded, Mapping) and isinstance(decoded.get("budget"), Mapping):
+                            persisted_budget = decoded["budget"]
+                            break
+                    elif isinstance(decoded, Mapping):
+                        persisted_budget = decoded
                         break
-                if not isinstance(persisted_budget, Mapping) or not {
-                    "max_wall_seconds",
-                    "command_timeout_seconds",
-                }.issubset(persisted_budget):
+                valid_budget = (
+                    isinstance(persisted_budget, Mapping)
+                    and (
+                        {"max_wall_seconds", "command_timeout_seconds"}.issubset(persisted_budget)
+                        or (
+                            isinstance(persisted_budget.get("kill_at_seconds"), int)
+                            and not isinstance(persisted_budget.get("kill_at_seconds"), bool)
+                            and persisted_budget["kill_at_seconds"] >= 1
+                        )
+                    )
+                )
+                if not valid_budget:
                     records.append(
                         {
                             "attempt_id": attempt_id,
@@ -2852,7 +2866,7 @@ class SQLiteEvaluationRepository:
                         """INSERT OR IGNORE INTO orphan_sessions
                            (orphan_id,attempt_id,evaluation_id,session_ref,reason,status,
                             metadata_json,created_at,updated_at,expires_at)
-                           VALUES (?,?,?,?,?,'open',?,?,?,?,?)""",
+                           VALUES (?,?,?,?,?,'open',?,?,?,?)""",
                         (
                             str(uuid.uuid4()), attempt_id, row["evaluation_id"],
                             row["session_ref"], "wall-budget-elapsed",
@@ -5159,7 +5173,7 @@ class SQLiteEvaluationRepository:
                 """INSERT INTO orphan_sessions
                    (orphan_id,attempt_id,evaluation_id,session_ref,reason,status,
                     metadata_json,created_at,updated_at,expires_at)
-                   VALUES (?,?,?,?,?,'open',?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,'open',?,?,?,?)""",
                 (orphan_id, attempt_id, row["evaluation_id"], row["session_ref"],
                  explanation, encoded_meta, timestamp, timestamp,
                  None if expires_at is None else _iso(expires_at)),

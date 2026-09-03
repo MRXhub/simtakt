@@ -655,7 +655,11 @@ class EvaluationMiddleware:
             persisted_budget = candidate.get("wall_budget")
             if persisted_budget is not None:
                 budget = persisted_budget
-            if isinstance(budget, Mapping) and isinstance(budget.get("kill_at_seconds"), int):
+            if (
+                isinstance(budget, Mapping)
+                and isinstance(budget.get("kill_at_seconds"), int)
+                and not isinstance(budget.get("kill_at_seconds"), bool)
+            ):
                 proofs[candidate["attempt_id"]] = int(budget["kill_at_seconds"])
                 continue
             max_wall = budget.get("max_wall_seconds") if isinstance(budget, Mapping) else None
@@ -669,6 +673,7 @@ class EvaluationMiddleware:
                 or command_timeout < 1
             ):
                 unreadable_budget_ids.add(candidate["attempt_id"])
+            else:
                 proofs[candidate["attempt_id"]] = int(multiplier * max_wall)
         results = self._repository.auto_release_wall_budget(
             proofs, now=now, reconcile_hold_seconds=reconcile_hold_seconds
