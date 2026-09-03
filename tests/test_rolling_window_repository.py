@@ -45,6 +45,7 @@ from control_plane.evaluation.execution_planning import materialize_session_plan
 from control_plane.evaluation.dispatcher import SessionLifecycleDispatcher
 from control_plane.evaluation.service import EvaluationMiddleware
 from control_plane.evaluation.scheduling import make_resource_allocation, schedule
+from control_plane.simulation.session_contracts import make_simulation_session_result
 
 
 REVISION = "sha256:" + "1" * 64
@@ -1412,6 +1413,138 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         for version in (12, 13, 14, 15, 16):
             self.assertIn(version, versions)
         self.assertEqual(SCHEMA_VERSION, 18)
+
+    def _lost_orphan_attempt(self, submission, *, now=BASE_TIME):
+        """Lease an Attempt, reconcile it lost, and record an open orphan."""
+        a1 = self.prepare(submission, window_limit=2, now=now)
+        a1 = self.lease(a1, now=now)
+        self.repository.mark_attempt_reconciling(
+            a1["attempt_id"], WORKER, ["artifact:reconciling"],
+            reason="fixture-reconciliation", now=now,
+        )
+        self.repository.reconcile_attempt(
+            a1["attempt_id"], WORKER, a1["allocation"]["session_ref"],
+            "absent", 300, now=now,
+        )
+        attempt = self.repository.get_attempt(a1["attempt_id"])
+        self.assertEqual(attempt["status"], "lost")
+        orphan = self.repository.record_orphan_session(
+            attempt_id=attempt["attempt_id"], reason="orphan-harvest",
+            metadata={"orphan_since": now.isoformat()}, now=now,
+        )
+        return attempt, orphan
+
+    def test_orphan_late_harvest_completes_lost_attempt_and_qualifies(self) -> None:
+        """A non-terminal Evaluation late-harvests its lost Attempt to completed."""
+        submission = self.submit()
+        attempt, orphan = self._lost_orphan_attempt(submission)
+        evaluation_id = orphan["evaluation_id"]
+        self.assertEqual(self.repository.get_evaluation(evaluation_id)["status"], "recovering")
+
+        outcome = self.repository.complete_orphan_attempt(
+            attempt["attempt_id"], WORKER, ["evidence.harvest.late"],
+            now=BASE_TIME + timedelta(seconds=2),
+        )
+        self.assertEqual(outcome["harvest_status"], "harvested")
+        self.assertEqual(self.repository.get_attempt(attempt["attempt_id"])["status"], "completed")
+        self.assertIn(
+            self.repository.get_evaluation(evaluation_id)["status"],
+            {"qualifying", "qualified"},
+        )
+        closed = self.repository.get_orphan_session(outcome["orphan_id"])
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["harvest_status"], "harvested")
+        harvest_events = [
+            event
+            for event in self.repository.state_events(attempt["attempt_id"])
+            if event["event_type"] == "AttemptCompleted"
+        ]
+        self.assertEqual(harvest_events[-1]["payload"]["reason"], "late-harvest")
+        self.assertEqual(
+            harvest_events[-1]["payload"]["artifact_ids"], ["evidence.harvest.late"]
+        )
+
+    def test_orphan_late_harvest_after_terminal_evaluation_is_discarded(self) -> None:
+        """A terminal Evaluation discards a late orphan harvest unchanged."""
+        submission = self.submit()
+        attempt, orphan = self._lost_orphan_attempt(submission)
+        evaluation_id = orphan["evaluation_id"]
+        self.repository.mark_unresolved(evaluation_id, "qualified-elsewhere")
+        self.assertEqual(self.repository.get_evaluation(evaluation_id)["status"], "unresolved")
+
+        outcome = self.repository.complete_orphan_attempt(
+            attempt["attempt_id"], WORKER, ["evidence.duplicate.late"],
+            now=BASE_TIME + timedelta(seconds=2),
+        )
+        self.assertEqual(outcome["harvest_status"], "discarded")
+        # No attempt/evaluation status change.
+        self.assertEqual(self.repository.get_attempt(attempt["attempt_id"])["status"], "lost")
+        self.assertEqual(self.repository.get_evaluation(evaluation_id)["status"], "unresolved")
+        closed = self.repository.get_orphan_session(outcome["orphan_id"])
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["harvest_status"], "discarded")
+        events = self.repository.state_events(attempt["attempt_id"])
+        self.assertTrue(
+            any(event["event_type"] == "AttemptDiscardedDuplicate" for event in events)
+        )
+        self.assertFalse(
+            any(
+                event["event_type"] == "AttemptCompleted"
+                and event["payload"].get("reason") == "late-harvest"
+                for event in events
+            )
+        )
+
+    def test_duplicate_completion_after_late_harvest_marks_discarded_duplicate(self) -> None:
+        """A duplicate normal completion after a late harvest does not raise."""
+        submission = self.submit()
+        attempt1, orphan1 = self._lost_orphan_attempt(submission)
+        evaluation_id = orphan1["evaluation_id"]
+        middleware = EvaluationMiddleware(self.repository)
+        self.assertEqual(
+            middleware.auto_requeue_recovering(now=BASE_TIME + timedelta(seconds=1))[0]["status"],
+            "queued",
+        )
+        second = self.lease(
+            self.prepare(submission, window_limit=2, now=BASE_TIME + timedelta(seconds=1)),
+            now=BASE_TIME + timedelta(seconds=1),
+        )
+        self.repository.confirm_attempt_start(
+            second["attempt_id"], WORKER, now=BASE_TIME + timedelta(seconds=1)
+        )
+        # Late harvest arrives first: attempt1 completes and the Evaluation
+        # moves to qualifying while the duplicate attempt is still running.
+        outcome = self.repository.complete_orphan_attempt(
+            attempt1["attempt_id"], WORKER, ["evidence.late.harvest"],
+            now=BASE_TIME + timedelta(seconds=2),
+        )
+        self.assertEqual(outcome["harvest_status"], "harvested")
+        self.assertEqual(self.repository.get_evaluation(evaluation_id)["status"], "qualifying")
+
+        # The duplicate now completes normally; the reverse race must not raise.
+        self.repository.begin_collection(
+            second["attempt_id"], WORKER, now=BASE_TIME + timedelta(seconds=2)
+        )
+        running = self.repository.get_attempt(second["attempt_id"])
+        result = make_simulation_session_result(
+            plan_id=running["execution_plan_id"],
+            attempt_id=running["attempt_id"],
+            session_ref=running["session_ref"],
+            status="completed",
+            solver_run_record_ids=["solver-run-record:sha256:" + "b" * 64],
+            journal_artifact_id="journal.duplicate",
+            evidence_artifact_ids=["evidence.duplicate.run"],
+        )
+        completed = middleware.complete_session(
+            result, WORKER, "evidence.duplicate.run",
+            now=BASE_TIME + timedelta(seconds=3),
+        )
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(self.repository.get_evaluation(evaluation_id)["status"], "qualifying")
+        events = self.repository.state_events(second["attempt_id"])
+        self.assertTrue(
+            any(event["event_type"] == "AttemptDiscardedDuplicate" for event in events)
+        )
 
 
 if __name__ == "__main__":
