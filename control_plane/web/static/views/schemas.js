@@ -20,6 +20,10 @@ const PRESET_SCHEMAS = {
   solar: {
     kind: "parameter-schema",
     problem_hint: "ten-junction-thickness-tcad",
+    source_package: {
+      artifact_id: "pkg.ten-junction-tcad",
+      revision: "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0"
+    },
     parameters: [
       { name: "t_total1", type: "float", unit: "um", role: "variable", bounds: { min: 0.1, max: 5.0 }, default: 0.551, deck_line: 3 },
       { name: "t_total2", type: "float", unit: "um", role: "variable", bounds: { min: 0.1, max: 5.0 }, default: 0.820, deck_line: 4 },
@@ -39,6 +43,10 @@ const PRESET_SCHEMAS = {
   cmos: {
     kind: "parameter-schema",
     problem_hint: "cmos-inverter-delay-opt",
+    source_package: {
+      artifact_id: "pkg.cmos-inverter-hspice",
+      revision: "sha256:b2c3d4e5f6a708192a3b4c5d6e7f809123456789abcdef0123456789abcdef1"
+    },
     parameters: [
       { name: "wn_width_nm", type: "float", unit: "nm", role: "variable", bounds: { min: 50, max: 1000 }, default: 120.0, deck_line: 3 },
       { name: "wp_width_nm", type: "float", unit: "nm", role: "variable", bounds: { min: 50, max: 2000 }, default: 240.0, deck_line: 4 },
@@ -55,6 +63,10 @@ const PRESET_SCHEMAS = {
   plasma: {
     kind: "parameter-schema",
     problem_hint: "spis-plasma-charging",
+    source_package: {
+      artifact_id: "pkg.spis-spacecraft-charging",
+      revision: "sha256:c3d4e5f6a7b8091a2b3c4d5e6f70819223456789abcdef0123456789abcdef2"
+    },
     parameters: [
       { name: "plasma_density_m3", type: "float", unit: "m^-3", role: "variable", bounds: { min: 1e6, max: 1e12 }, default: 1.0e8, deck_line: 3 },
       { name: "electron_temp_ev", type: "float", unit: "eV", role: "variable", bounds: { min: 0.5, max: 20.0 }, default: 2.5, deck_line: 4 },
@@ -116,6 +128,10 @@ export async function renderSchemasView({ revision } = {}) {
       draft.doc = {
         kind: "parameter-schema",
         problem_hint: "custom-schema",
+        source_package: {
+          artifact_id: "pkg.custom",
+          revision: "sha256:" + "0".repeat(64)
+        },
         parameters: [
           { name: "param_1", type: "float", role: "variable", bounds: { min: 0.1, max: 10.0 }, default: 1.0 }
         ],
