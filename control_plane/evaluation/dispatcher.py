@@ -104,6 +104,8 @@ class SessionLifecycleDispatcher:
 
     def recover_once(self, *, now: datetime | None = None) -> dict[str, Any] | None:
         """Observe one reconciling session before applying wall-proof recovery."""
+        if now is not None and getattr(now, "tzinfo", None) is None:
+            raise ValueError("recover_once requires a timezone-aware now")
 
         self.last_auto_released = []
         self.last_auto_requeued = []
@@ -197,6 +199,58 @@ class SessionLifecycleDispatcher:
             return value
         return 604800
 
+    def _record_orphan_event(
+        self,
+        orphan_id: str,
+        from_status: str | None,
+        to_status: str,
+        event_type: str,
+        payload: Mapping[str, Any],
+        now: datetime,
+    ) -> None:
+        """Best-effort orphan state-event write; never aborts recovery."""
+        recorder = getattr(self.middleware, "record_orphan_state_event", None)
+        if not callable(recorder):
+            return
+        try:
+            recorder(
+                orphan_id,
+                from_status=from_status,
+                to_status=to_status,
+                event_type=event_type,
+                payload=payload,
+                now=now,
+            )
+        except Exception:
+            return
+
+    def _record_orphan_observe_failure(
+        self, orphan: Mapping[str, Any], exc: Exception, now: datetime
+    ) -> None:
+        orphan_id = str(orphan.get("orphan_id") or "")
+        if not orphan_id:
+            return
+        try:
+            self._record_orphan_event(
+                orphan_id,
+                "open",
+                "open",
+                "OrphanObserveFailed",
+                {
+                    "orphan_id": orphan_id,
+                    "attempt_id": orphan.get("attempt_id"),
+                    "session_ref": orphan.get("session_ref"),
+                    "error": {
+                        "kind": "orphan-observe",
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                },
+                now,
+            )
+        except Exception:
+            return
+
     def _reconcile_open_orphans(self, *, now: datetime | None = None) -> int:
         """Observe and recover at most ``orphan_batch_size`` open orphans."""
         current = now or datetime.now().astimezone()
@@ -213,8 +267,13 @@ class SessionLifecycleDispatcher:
             return 0
         processed = 0
         for orphan in open_orphans[: self._orphan_batch_size()]:
-            if self._reconcile_one_orphan(orphan, current):
-                processed += 1
+            try:
+                if self._reconcile_one_orphan(orphan, current):
+                    processed += 1
+            except Exception as exc:
+                # A failing orphan is isolated: record the failure as an orphan
+                # state event and continue the bounded round with the next one.
+                self._record_orphan_observe_failure(orphan, exc, current)
         return processed
 
     def _reconcile_one_orphan(self, orphan: Mapping[str, Any], now: datetime) -> bool:
@@ -236,26 +295,27 @@ class SessionLifecycleDispatcher:
             seconds=self._orphan_ttl_seconds()
         )
 
+        kill_at_elapsed = kill_dt is not None and now >= kill_dt
         observation = self._observe_orphan(latest)
-        if observation == "absent":
-            meta["closed_at"] = _orphan_timestamp(now)
-            update(orphan_id, status="closed", metadata=meta, now=now)
-            return True
-        if ttl_passed:
-            meta["terminate_status"] = "expired"
-            meta["closed_at"] = _orphan_timestamp(now)
-            update(orphan_id, status="closed", metadata=meta, now=now)
-            return True
-        if observation == "running":
-            if kill_dt is None or now < kill_dt:
-                meta["last_observed_status"] = "running"
-                meta["last_observed_at"] = _orphan_timestamp(now)
-                update(orphan_id, status="open", metadata=meta, now=now)
-                return True
-            return self._terminate_orphan(latest, meta, now)
+        # A finished session is harvested first, regardless of TTL expiry.
         if observation == "completed":
             return self._collect_orphan(latest, meta, now)
-        # unreachable / indeterminate -> leave the orphan open for a later round.
+        if observation == "absent":
+            meta["last_observed_status"] = "absent"
+            meta["closed_at"] = _orphan_timestamp(now)
+            update(orphan_id, status="closed", metadata=meta, now=now)
+            return True
+        if observation in {"running", "unreachable", "indeterminate"}:
+            if kill_at_elapsed or ttl_passed:
+                # Over-budget live session: terminate it.  The orphan stays open
+                # (still holding its license) until the termination is confirmed
+                # by a later round.
+                return self._terminate_orphan(latest, meta, now)
+            meta["last_observed_status"] = observation
+            meta["last_observed_at"] = _orphan_timestamp(now)
+            update(orphan_id, status="open", metadata=meta, now=now)
+            return True
+        # unobservable -> leave the orphan open for a later round.
         return False
 
     def _observe_orphan(self, orphan: Mapping[str, Any]) -> str | None:
@@ -277,11 +337,8 @@ class SessionLifecycleDispatcher:
         observe = getattr(self.worker, "observe_session", None)
         if not callable(resume) or not callable(observe):
             return None
-        try:
-            resume(plan, allocation, session_ref)
-            return normalize_session_observation(observe(session_ref))
-        except Exception:
-            return None
+        resume(plan, allocation, session_ref)
+        return normalize_session_observation(observe(session_ref))
 
     def _collect_orphan(
         self, orphan: Mapping[str, Any], meta: dict[str, Any], now: datetime
@@ -320,8 +377,26 @@ class SessionLifecycleDispatcher:
         if not callable(update):
             return True
         if not callable(terminate):
+            # Termination is unavailable (no worker capability), so the
+            # over-budget orphan cannot be killed; close it as expired and
+            # record an orphan state event.
             meta["terminate_status"] = "unavailable"
-            update(orphan_id, status="open", metadata=meta, now=now)
+            meta["closed_at"] = _orphan_timestamp(now)
+            self._record_orphan_event(
+                orphan_id,
+                "open",
+                "closed",
+                "OrphanTerminationUnavailable",
+                {
+                    "orphan_id": orphan_id,
+                    "attempt_id": latest.get("attempt_id"),
+                    "session_ref": session_ref,
+                    "reason": "terminate-unavailable",
+                    "closed_at": meta["closed_at"],
+                },
+                now,
+            )
+            update(orphan_id, status="closed", metadata=meta, now=now)
             return True
         try:
             outcome = normalize_session_termination(terminate(session_ref))
