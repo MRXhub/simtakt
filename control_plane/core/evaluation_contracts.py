@@ -30,7 +30,6 @@ ATTEMPT_STATES = frozenset(
     {
         "planned",
         "starting",
-        "unconfirmed",
         "leased",
         "running",
         "reconciling",
@@ -64,33 +63,30 @@ TERMINATION_REQUEST_SOURCE_STATES = frozenset(
     {"starting", "running", "collecting", "reconciling"}
 )
 
-# States in which an Attempt is active and blocks preparation reuse; starting and
-# unconfirmed are included because dispatch work is in-flight before lease confirmation.
+# States in which an Attempt is active and blocks preparation reuse; starting is
+# included because dispatch work is in-flight before lease confirmation.
 ACTIVE_ATTEMPT_STATES = frozenset(
     {
         "planned",
         "starting",
-        "unconfirmed",
         "leased",
         "running",
         "reconciling",
         "collecting",
     }
 )
-# States that retain a capacity allocation; planned has none, while starting and
-# unconfirmed reserve capacity even before a worker lease is confirmed.
+# States that retain a capacity allocation; planned has none, while starting
+# reserves capacity even before a worker lease is confirmed.
 CAPACITY_HOLDING_ATTEMPT_STATES = frozenset(
-    {"starting", "unconfirmed", "leased", "running", "collecting", "reconciling"}
+    {"starting", "leased", "running", "collecting", "reconciling"}
 )
-# States whose owner is expected to renew a lease; starting is worker-owned, while
-# unconfirmed is capacity-held but has no confirmed owner and therefore no heartbeat.
+# States whose owner is expected to renew a lease.
 HEARTBEATABLE_ATTEMPT_STATES = frozenset({"starting", "leased", "running", "collecting"})
 
 
 _ATTEMPT_STATE_SQL_ORDER = (
     "planned",
     "starting",
-    "unconfirmed",
     "leased",
     "running",
     "reconciling",

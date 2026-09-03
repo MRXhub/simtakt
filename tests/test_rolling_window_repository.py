@@ -862,7 +862,6 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         SQLiteEvaluationRepository(self.database)
         sql, _ = self._sqlite_index()
         self.assertIn("starting", sql.lower())
-        self.assertIn("unconfirmed", sql.lower())
         with closing(sqlite3.connect(self.database)) as connection:
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(attempts)")
@@ -880,7 +879,6 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         self.assertEqual(before_sql, after_sql)
         self.assertEqual(before_rootpage, after_rootpage)
         self.assertIn("starting", after_sql.lower())
-        self.assertIn("unconfirmed", after_sql.lower())
 
     def _duplicate_attempt_with_status(self, status: str, suffix: str) -> tuple[str, str]:
         attempt = self.prepare(self.submit(), window_limit=3)
@@ -905,9 +903,8 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             connection.rollback()
         return attempt["attempt_id"], duplicate
 
-    def test_starting_and_unconfirmed_are_unique_active_preparations(self) -> None:
-        for status in ("starting", "unconfirmed"):
-            self._duplicate_attempt_with_status(status, status)
+    def test_starting_is_unique_active_preparation(self) -> None:
+        self._duplicate_attempt_with_status("starting", "starting")
 
     def test_terminal_attempt_does_not_conflict_on_preparation(self) -> None:
         attempt = self.prepare(self.submit())
@@ -929,19 +926,20 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             )
             connection.commit()
 
-    def test_new_states_are_in_active_allocation_projection(self) -> None:
-        for status in ("starting", "unconfirmed"):
-            attempt = self.lease(
-                self.prepare(self.submit(), window_limit=3), now=BASE_TIME
+    def test_starting_is_in_active_allocation_projection(self) -> None:
+        attempt = self.lease(
+            self.prepare(self.submit(), window_limit=3), now=BASE_TIME
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE attempts SET status='starting' WHERE attempt_id=?",
+                (attempt["attempt_id"],),
             )
-            with closing(sqlite3.connect(self.database)) as connection:
-                connection.execute(
-                    "UPDATE attempts SET status=? WHERE attempt_id=?",
-                    (status, attempt["attempt_id"]),
-                )
-                connection.commit()
-            ids = {row["attempt_id"] for row in self.repository.list_active_allocations()}
-            self.assertIn(attempt["attempt_id"], ids)
+            connection.commit()
+        self.assertIn(
+            attempt["attempt_id"],
+            {row["attempt_id"] for row in self.repository.list_active_allocations()},
+        )
 
         planned = self.lease(
             self.prepare(self.submit(), window_limit=4), now=BASE_TIME
@@ -958,12 +956,10 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         )
 
     def test_attempt_state_constant_invariants(self) -> None:
-        self.assertTrue({"starting", "unconfirmed"} <= ATTEMPT_STATES)
-        self.assertTrue({"starting", "unconfirmed"} <= ACTIVE_ATTEMPT_STATES)
-        self.assertTrue({"starting", "unconfirmed"} <= CAPACITY_HOLDING_ATTEMPT_STATES)
+        self.assertIn("starting", ATTEMPT_STATES)
+        self.assertIn("starting", ACTIVE_ATTEMPT_STATES)
+        self.assertIn("starting", CAPACITY_HOLDING_ATTEMPT_STATES)
         self.assertIn("starting", HEARTBEATABLE_ATTEMPT_STATES)
-        # An unconfirmed attempt has no confirmed owner, so cannot heartbeat.
-        self.assertNotIn("unconfirmed", HEARTBEATABLE_ATTEMPT_STATES)
         self.assertNotIn("planned", CAPACITY_HOLDING_ATTEMPT_STATES)
         self.assertNotIn("reconciling", HEARTBEATABLE_ATTEMPT_STATES)
         outputs = [attempt_states_sql(ATTEMPT_STATES) for _ in range(3)]
