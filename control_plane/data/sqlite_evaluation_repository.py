@@ -60,7 +60,7 @@ _CAPACITY_HOLDING_ATTEMPT_STATES_SQL = attempt_states_sql(CAPACITY_HOLDING_ATTEM
 _HEARTBEATABLE_ATTEMPT_STATES_SQL = attempt_states_sql(HEARTBEATABLE_ATTEMPT_STATES)
 
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 _SHA256_REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -233,6 +233,7 @@ class SQLiteEvaluationRepository:
                     last_heartbeat_at TEXT,
                     execution_preparation_id TEXT,
                     execution_preparation_json TEXT,
+                    wall_budget_json TEXT,
                     selected_execution_option_id TEXT,
                     execution_plan_id TEXT,
                     execution_plan_json TEXT,
@@ -418,6 +419,8 @@ class SQLiteEvaluationRepository:
                         connection.execute(
                             "ALTER TABLE attempts ADD COLUMN feedback_recorded_at TEXT"
                         )
+                    if "wall_budget_json" not in columns:
+                        connection.execute("ALTER TABLE attempts ADD COLUMN wall_budget_json TEXT")
                     if "last_heartbeat_at" not in columns:
                         connection.execute(
                             "ALTER TABLE attempts ADD COLUMN last_heartbeat_at TEXT"
@@ -3423,6 +3426,24 @@ class SQLiteEvaluationRepository:
             ).fetchone()
             if row is None:
                 raise RepositoryError(f"unknown Attempt: {attempt_id}")
+            budget_json = row["wall_budget_json"]
+            if budget_json is None and row["execution_plan_json"] is not None:
+                try:
+                    plan_budget = json.loads(row["execution_plan_json"]).get("budget", {})
+                    declared = int(plan_budget.get("max_wall_seconds", 1))
+                    budget_json = canonical_json({
+                        "budget_seconds": max(1, declared),
+                        "kill_at_seconds": max(1, int(math.ceil(1.7 * declared))),
+                        "stall_seconds": max(1, int(math.ceil(0.25 * declared))),
+                        "source": "declared", "sample_count": 0, "widened": False,
+                    })
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    budget_json = None
+            if budget_json is not None:
+                connection.execute(
+                    "UPDATE attempts SET wall_budget_json = ?, updated_at = ? WHERE attempt_id = ?",
+                    (budget_json, timestamp, attempt_id),
+                )
             if row["status"] != "starting":
                 raise RepositoryError(
                     f"Attempt {attempt_id} is {row['status']}; launch confirmation requires starting"
@@ -3691,6 +3712,7 @@ class SQLiteEvaluationRepository:
         session_ref: str | None = None,
         execution_plan_id: str | None = None,
         now: datetime | None = None,
+        wall_budget: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if (session_ref is None) != (execution_plan_id is None):
             raise RepositoryError(
@@ -3721,6 +3743,13 @@ class SQLiteEvaluationRepository:
                     UPDATE attempts SET session_ref = ? WHERE attempt_id = ?
                     """,
                     (normalized_session_ref, attempt_id),
+                )
+            if wall_budget is not None:
+                if not isinstance(wall_budget, Mapping):
+                    raise RepositoryError("wall_budget must be an object")
+                connection.execute(
+                    "UPDATE attempts SET wall_budget_json = ?, updated_at = ? WHERE attempt_id = ?",
+                    (canonical_json(dict(wall_budget)), _iso(_utc_now() if now is None else now), attempt_id),
                 )
             self._transition_attempt(
                 connection,
@@ -4939,6 +4968,10 @@ class SQLiteEvaluationRepository:
             "selected_execution_option_id": row[
                 "selected_execution_option_id"
             ],
+            "wall_budget": (
+                None if row["wall_budget_json"] is None
+                else json.loads(row["wall_budget_json"])
+            ),
             "execution_plan_id": row["execution_plan_id"],
             "execution_plan": (
                 None

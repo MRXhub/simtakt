@@ -643,11 +643,14 @@ class EvaluationMiddleware:
                 if isinstance(plan, Mapping) and isinstance(plan.get("budget"), Mapping):
                     budget = plan["budget"]
                     break
-            if budget is None:
-                unreadable_budget_ids.add(candidate["attempt_id"])
+            persisted_budget = candidate.get("wall_budget")
+            if persisted_budget is not None:
+                budget = persisted_budget
+            if isinstance(budget, Mapping) and isinstance(budget.get("kill_at_seconds"), int):
+                proofs[candidate["attempt_id"]] = int(budget["kill_at_seconds"])
                 continue
-            max_wall = budget.get("max_wall_seconds")
-            command_timeout = budget.get("command_timeout_seconds")
+            max_wall = budget.get("max_wall_seconds") if isinstance(budget, Mapping) else None
+            command_timeout = budget.get("command_timeout_seconds") if isinstance(budget, Mapping) else None
             if (
                 isinstance(max_wall, bool)
                 or not isinstance(max_wall, int)
@@ -658,7 +661,7 @@ class EvaluationMiddleware:
             ):
                 unreadable_budget_ids.add(candidate["attempt_id"])
                 continue
-            proofs[candidate["attempt_id"]] = max_wall + command_timeout + 600
+            proofs[candidate["attempt_id"]] = int(1.7 * max_wall)
         results = self._repository.auto_release_wall_budget(proofs, now=now)
         for result in results:
             if (
