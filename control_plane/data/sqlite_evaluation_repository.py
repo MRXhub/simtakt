@@ -4078,6 +4078,62 @@ class SQLiteEvaluationRepository:
             rows = connection.execute("SELECT * FROM task_shape_stats ORDER BY task_class_key,target_id,profile_revision,processors").fetchall()
         return [self._shape_record(row) for row in rows]
 
+    def list_completed_wall_samples(
+        self,
+        problem_revision: str,
+        fidelity: str | None = None,
+        target_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return successful measured wall samples with their evaluation lineage."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise RepositoryError("wall sample limit must be a positive integer")
+        clauses = ["c.problem_revision = ?", "a.status = 'completed'",
+                   "af.succeeded = 1", "af.wall_seconds IS NOT NULL"]
+        params: list[Any] = [str(problem_revision)]
+        if fidelity is not None:
+            clauses.append("e.fidelity = ?")
+            params.append(str(fidelity))
+        if target_id is not None:
+            clauses.append("af.target_id = ?")
+            params.append(str(target_id))
+        params.append(limit)
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                f"""SELECT af.attempt_id, af.wall_seconds AS measured_wall_seconds,
+                           af.target_id, e.fidelity, c.problem_revision
+                    FROM attempt_feedback af
+                    JOIN attempts a ON a.attempt_id = af.attempt_id
+                    JOIN evaluations e ON e.evaluation_id = a.evaluation_id
+                    JOIN candidates c ON c.candidate_id = e.candidate_id
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY af.created_at, af.attempt_id LIMIT ?""",
+                tuple(params),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_wall_budget_kills(
+        self,
+        problem_revision: str,
+        fidelity: str | None = None,
+        target_id: str | None = None,
+    ) -> int:
+        clauses = ["c.problem_revision = ?", "a.failure_class = 'wall-budget-elapsed'"]
+        params: list[Any] = [str(problem_revision)]
+        if fidelity is not None:
+            clauses.append("e.fidelity = ?"); params.append(str(fidelity))
+        if target_id is not None:
+            clauses.append("af.target_id = ?"); params.append(str(target_id))
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                f"""SELECT COUNT(*) AS n FROM attempts a
+                    JOIN evaluations e ON e.evaluation_id = a.evaluation_id
+                    JOIN candidates c ON c.candidate_id = e.candidate_id
+                    LEFT JOIN attempt_feedback af ON af.attempt_id = a.attempt_id
+                    WHERE {' AND '.join(clauses)}""",
+                tuple(params),
+            ).fetchone()
+        return int(row["n"])
     def budget_proposals(self, *, tier2_min_samples: int = 30) -> list[dict[str, Any]]:
         """Build read-only wall-budget proposals from mature shape statistics."""
         if isinstance(tier2_min_samples, bool) or not isinstance(tier2_min_samples, int) or tier2_min_samples < 1:

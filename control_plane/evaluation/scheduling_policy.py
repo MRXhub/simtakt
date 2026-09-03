@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import hashlib
 import json
 import re
@@ -32,6 +33,20 @@ _POLICY_FIELDS = frozenset(
         "aging_quantum_seconds",
         "preparation_claim_seconds",
         "option_policy",
+        "kill_multiplier",
+        "stall_fraction",
+        "min_budget_samples",
+        "kill_rate_widen_threshold",
+        "kill_widen_factor",
+    }
+)
+_POLICY_OPTIONAL_FIELDS = frozenset(
+    {
+        "kill_multiplier",
+        "stall_fraction",
+        "min_budget_samples",
+        "kill_rate_widen_threshold",
+        "kill_widen_factor",
     }
 )
 _REQUIRED_CAPACITY_FIELDS = frozenset(
@@ -97,7 +112,10 @@ def _priority_order(value: Any) -> list[str]:
 def validate_scheduling_policy(value: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and copy the complete immutable SchedulingPolicy contract."""
 
-    if not isinstance(value, Mapping) or set(value) != _POLICY_FIELDS:
+    if not isinstance(value, Mapping) or set(value) not in (
+        _POLICY_FIELDS,
+        _POLICY_FIELDS - _POLICY_OPTIONAL_FIELDS,
+    ):
         raise SchedulingPolicyError(
             "SchedulingPolicy contains missing or unknown fields"
         )
@@ -146,6 +164,21 @@ def validate_scheduling_policy(value: Mapping[str, Any]) -> dict[str, Any]:
         raise SchedulingPolicyError(
             "option_policy must be throughput or latency"
         )
+    kill_multiplier = value.get("kill_multiplier", 1.7)
+    stall_fraction = value.get("stall_fraction", 0.25)
+    threshold = value.get("kill_rate_widen_threshold", 0.10)
+    widen_factor = value.get("kill_widen_factor", 1.5)
+    for item, label in (
+        (kill_multiplier, "kill_multiplier"),
+        (stall_fraction, "stall_fraction"),
+        (threshold, "kill_rate_widen_threshold"),
+        (widen_factor, "kill_widen_factor"),
+    ):
+        if isinstance(item, bool) or not isinstance(item, (int, float)) or not math.isfinite(float(item)) or float(item) <= 0:
+            raise SchedulingPolicyError(f"{label} must be a positive number")
+    if float(stall_fraction) >= 1:
+        raise SchedulingPolicyError("stall_fraction must be less than 1")
+    min_samples = _positive_integer(value.get("min_budget_samples", 5), "min_budget_samples")
     normalized = {
         "schema_version": value.get("schema_version"),
         "policy_kind": value.get("policy_kind"),
@@ -153,20 +186,23 @@ def validate_scheduling_policy(value: Mapping[str, Any]) -> dict[str, Any]:
         "capacity_envelope": normalized_capacity,
         "priority_order": priorities,
         "default_priority": default_priority,
-        "aging_quantum_seconds": _positive_integer(
-            value.get("aging_quantum_seconds"), "aging_quantum_seconds"
-        ),
-        "preparation_claim_seconds": _positive_integer(
-            value.get("preparation_claim_seconds"),
-            "preparation_claim_seconds",
-        ),
+        "aging_quantum_seconds": _positive_integer(value.get("aging_quantum_seconds"), "aging_quantum_seconds"),
+        "preparation_claim_seconds": _positive_integer(value.get("preparation_claim_seconds"), "preparation_claim_seconds"),
         "option_policy": option_policy,
+        "kill_multiplier": float(kill_multiplier),
+        "stall_fraction": float(stall_fraction),
+        "min_budget_samples": min_samples,
+        "kill_rate_widen_threshold": float(threshold),
+        "kill_widen_factor": float(widen_factor),
     }
     if (
         normalized["schema_version"] != 1
         or normalized["policy_kind"] != "project-scheduling-policy"
         or normalized["status"] != "active"
-        or dict(value) != normalized
+        or any(
+            key in value and value[key] != normalized[key]
+            for key in normalized
+        )
     ):
         raise SchedulingPolicyError("SchedulingPolicy is invalid")
     return json.loads(
@@ -245,6 +281,26 @@ class GovernedSchedulingPolicy:
             self._seal is _POLICY_SEAL
             and self._project_root == Path(project_root).resolve()
         )
+
+    @property
+    def kill_multiplier(self) -> float:
+        return float(self.as_mapping()["kill_multiplier"])
+
+    @property
+    def stall_fraction(self) -> float:
+        return float(self.as_mapping()["stall_fraction"])
+
+    @property
+    def min_budget_samples(self) -> int:
+        return int(self.as_mapping()["min_budget_samples"])
+
+    @property
+    def kill_rate_widen_threshold(self) -> float:
+        return float(self.as_mapping()["kill_rate_widen_threshold"])
+
+    @property
+    def kill_widen_factor(self) -> float:
+        return float(self.as_mapping()["kill_widen_factor"])
 
     @property
     def capacity_slots(self) -> int:
