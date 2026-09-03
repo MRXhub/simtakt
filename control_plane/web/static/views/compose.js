@@ -324,7 +324,7 @@ export async function renderCompose({ initialStep = 1, detailId = null, detailTy
       }
 
       const pData = r.data.problem || r.data.contract || r.data;
-      const rev = pData.problem_revision || "sha256:registered";
+      const rev = pData.problem_revision || pData.revision || "sha256:registered";
       state.candidateDesigner.problemId = pidIn.value.trim();
       state.candidateDesigner.problemRev = rev;
 
@@ -338,6 +338,12 @@ export async function renderCompose({ initialStep = 1, detailId = null, detailTy
         navigate("#/compose?step=4");
       };
       msg.appendChild(el("div", { style: "margin-top: 6px;" }, advanceBtn));
+
+      const updatedCatalog = await renderProblemsView({ isEmbedded: true });
+      const oldCatalog = wrap.querySelector(".problems-catalog-section");
+      if (oldCatalog && updatedCatalog.querySelector(".problems-catalog-section")) {
+        oldCatalog.replaceWith(updatedCatalog.querySelector(".problems-catalog-section"));
+      }
     };
 
     wrap.appendChild(createCard);
@@ -413,7 +419,7 @@ export async function renderCompose({ initialStep = 1, detailId = null, detailTy
 
     const autoField = el("div", "form-field");
     autoField.appendChild(el("label", "", txt(t("fieldAutomationProfile"))));
-    const autoIn = el("input", { type: "text", id: "s-auto", className: "mono", value: "standard" });
+    const autoIn = el("input", { type: "text", id: "s-auto", className: "mono", value: "assisted" });
     autoField.appendChild(autoIn);
     r2.appendChild(autoField);
     createCard.appendChild(r2);
@@ -513,6 +519,12 @@ export async function renderCompose({ initialStep = 1, detailId = null, detailTy
         navigate("#/compose?step=5");
       };
       msg.appendChild(el("div", { style: "margin-top: 6px;" }, advanceBtn));
+
+      const updatedCatalog = await renderStudiesView({ isEmbedded: true });
+      const oldCatalog = wrap.querySelector(".studies-catalog-section");
+      if (oldCatalog && updatedCatalog.querySelector(".studies-catalog-section")) {
+        oldCatalog.replaceWith(updatedCatalog.querySelector(".studies-catalog-section"));
+      }
     };
 
     wrap.appendChild(createCard);
