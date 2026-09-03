@@ -1627,6 +1627,268 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             {"qualifying", "qualified"},
         )
 
+    # ---- H1: TTL ordering, running-orphan termination, terminate-unavailable
+
+    class _HarvestNoQualifyMiddleware(EvaluationMiddleware):
+        """EvaluationMiddleware that skips adapter qualification on harvest."""
+
+        def _qualify_completed_attempt(self, attempt_id, collected_artifact_ids, completed):
+            return None
+
+    def _make_orphan_dispatcher(self, middleware, worker):
+        return SessionLifecycleDispatcher(
+            middleware, mock.Mock(), worker,
+            dispatcher_id="dispatcher:orphan-reg", lease_seconds=30,
+        )
+
+    def test_h1_completed_orphan_past_ttl_is_harvested(self) -> None:
+        """Regression: a completed orphan is harvested even after its TTL,
+        instead of being closed as ``expired``."""
+        submission = self.submit()
+        attempt, orphan = self._lost_orphan_attempt(
+            submission, now=BASE_TIME - timedelta(seconds=700000)
+        )
+        orphan_id = orphan["orphan_id"]
+        running = self.repository.get_attempt(attempt["attempt_id"])
+        plan_id = running["execution_plan_id"]
+        session_ref = orphan["session_ref"]
+        result = make_simulation_session_result(
+            plan_id=plan_id,
+            attempt_id=attempt["attempt_id"],
+            session_ref=session_ref,
+            status="completed",
+            solver_run_record_ids=["solver-run-record:sha256:" + "c" * 64],
+            journal_artifact_id="journal.orphan.completed",
+            evidence_artifact_ids=["evidence.orphan.completed.run"],
+        )
+
+        class _CompletedWorker:
+            def resume_session(self, plan, allocation, session_ref):
+                return None
+
+            def observe_session(self, session_ref):
+                return "completed"
+
+            def collect_session(self, session_ref):
+                return result, "evidence.orphan.completed"
+
+        middleware = self._HarvestNoQualifyMiddleware(self.repository)
+        dispatcher = self._make_orphan_dispatcher(
+            middleware, _CompletedWorker()
+        )
+        dispatcher.recover_once(now=BASE_TIME)
+        closed = self.repository.get_orphan_session(orphan_id)
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["harvest_status"], "harvested")
+        # Never closed as expired by the TTL path.
+        self.assertNotEqual(closed["metadata"].get("terminate_status"), "expired")
+        harvest_events = [
+            event
+            for event in self.repository.state_events(attempt["attempt_id"])
+            if event["event_type"] == "AttemptCompleted"
+        ]
+        self.assertEqual(harvest_events[-1]["payload"]["reason"], "late-harvest")
+
+    def test_h1_running_orphan_past_ttl_stays_open_until_termination_confirmed(
+        self,
+    ) -> None:
+        """Regression: a running orphan past its TTL is terminated, but it
+        remains open (still holding a license) until a round confirms the
+        termination."""
+        running = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+        orphan = self.repository.record_orphan_session(
+            attempt_id=running["attempt_id"], reason="orphan-ttl",
+            metadata={
+                "orphan_since": (
+                    BASE_TIME - timedelta(seconds=700000)
+                ).isoformat()
+            },
+            now=BASE_TIME,
+        )
+        orphan_id = orphan["orphan_id"]
+
+        class _RunningWorker:
+            def __init__(self):
+                self.terminate_calls = 0
+
+            def resume_session(self, plan, allocation, session_ref):
+                return None
+
+            def observe_session(self, session_ref):
+                return "running"
+
+            def terminate_session(self, session_ref):
+                self.terminate_calls += 1
+                if self.terminate_calls == 1:
+                    raise RuntimeError("adapter not yet reachable")
+                return "terminated"
+
+        middleware = EvaluationMiddleware(self.repository)
+        worker = _RunningWorker()
+        dispatcher = self._make_orphan_dispatcher(middleware, worker)
+        # First round: the adapter fails, so termination is only requested and
+        # the orphan stays open -- it still holds its license.
+        dispatcher._reconcile_open_orphans(now=BASE_TIME)
+        still_open = self.repository.get_orphan_session(orphan_id)
+        self.assertEqual(still_open["status"], "open")
+        self.assertEqual(still_open["metadata"]["terminate_status"], "requested")
+        # Second round: termination confirms and the orphan finally closes.
+        dispatcher._reconcile_open_orphans(
+            now=BASE_TIME + timedelta(seconds=1)
+        )
+        closed = self.repository.get_orphan_session(orphan_id)
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["metadata"]["terminate_status"], "confirmed")
+        self.assertIn("closed_at", closed["metadata"])
+
+    def test_h1_terminate_unavailable_closes_expired_with_state_event(self) -> None:
+        """Regression: when no worker terminate capability exists, the
+        over-budget orphan is closed as unavailable/expired and an orphan state
+        event is recorded."""
+        running = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+        orphan = self.repository.record_orphan_session(
+            attempt_id=running["attempt_id"], reason="orphan-ttl",
+            metadata={
+                "orphan_since": (
+                    BASE_TIME - timedelta(seconds=700000)
+                ).isoformat()
+            },
+            now=BASE_TIME,
+        )
+        orphan_id = orphan["orphan_id"]
+
+        class _NoTerminateWorker:
+            def resume_session(self, plan, allocation, session_ref):
+                return None
+
+            def observe_session(self, session_ref):
+                return "running"
+
+        middleware = EvaluationMiddleware(self.repository)
+        dispatcher = self._make_orphan_dispatcher(
+            middleware, _NoTerminateWorker()
+        )
+        dispatcher._reconcile_open_orphans(now=BASE_TIME)
+        closed = self.repository.get_orphan_session(orphan_id)
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["metadata"]["terminate_status"], "unavailable")
+        self.assertIn("closed_at", closed["metadata"])
+        events = self.repository.state_events(orphan_id)
+        self.assertTrue(
+            any(
+                event["event_type"] == "OrphanTerminationUnavailable"
+                for event in events
+            )
+        )
+
+    # ---- M1: sibling release only on a real rowcount transition
+
+    def test_m1_sibling_already_confirmed_is_not_written_attempt_lost(self) -> None:
+        """Regression: when the sibling is already settled (its termination is
+        confirmed), the late-harvest sibling release does not write AttemptLost
+        or mutate the sibling; an informational event records its state."""
+        submission = self.submit()
+        attempt1, orphan1 = self._lost_orphan_attempt(submission)
+        evaluation_id = orphan1["evaluation_id"]
+        middleware = EvaluationMiddleware(self.repository)
+        self.assertEqual(
+            middleware.auto_requeue_recovering(
+                now=BASE_TIME + timedelta(seconds=1)
+            )[0]["status"],
+            "queued",
+        )
+        second = self.lease(
+            self.prepare(
+                submission, window_limit=2, now=BASE_TIME + timedelta(seconds=1)
+            ),
+            now=BASE_TIME + timedelta(seconds=1),
+        )
+        self.repository.confirm_attempt_start(
+            second["attempt_id"], WORKER, now=BASE_TIME + timedelta(seconds=1)
+        )
+        # The sibling's session was already terminated/confirmed by another
+        # path while it is still reported running.
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE attempts SET termination_state='confirmed' "
+                "WHERE attempt_id=?",
+                (second["attempt_id"],),
+            )
+            connection.commit()
+        outcome = self.repository.complete_orphan_attempt(
+            attempt1["attempt_id"], WORKER, ["evidence.late.harvest"],
+            now=BASE_TIME + timedelta(seconds=2),
+        )
+        self.assertEqual(outcome["harvest_status"], "harvested")
+        sibling = self.repository.get_attempt(second["attempt_id"])
+        # State left unchanged (no lost transition).
+        self.assertEqual(sibling["status"], "running")
+        self.assertEqual(sibling["termination_state"], "confirmed")
+        events = self.repository.state_events(second["attempt_id"])
+        self.assertFalse(
+            any(event["event_type"] == "AttemptLost" for event in events)
+        )
+        settled = [
+            event
+            for event in events
+            if event["event_type"] == "AttemptSiblingAlreadySettled"
+        ]
+        self.assertTrue(settled)
+        self.assertEqual(
+            settled[-1]["payload"].get("sibling_termination_state"), "confirmed"
+        )
+
+    # ---- M2: recover_once rejects a naive now
+
+    def test_m2_recover_once_naive_now_raises_value_error(self) -> None:
+        middleware = EvaluationMiddleware(self.repository)
+        dispatcher = self._make_orphan_dispatcher(middleware, mock.Mock())
+        naive = datetime(2026, 8, 3, 0, 0)
+        with self.assertRaises(ValueError):
+            dispatcher.recover_once(now=naive)
+
+    # ---- M3: one failing orphan never aborts the bounded round
+
+    def test_m3_observe_exception_is_recorded_and_next_orphan_is_still_processed(
+        self,
+    ) -> None:
+        """Regression: an orphan whose observe raises records an orphan state
+        event and the loop continues with the next orphan."""
+        first_submission = self.submit()
+        first, first_orphan = self._lost_orphan_attempt(first_submission)
+        second_submission = self.submit()
+        second, second_orphan = self._lost_orphan_attempt(second_submission)
+
+        class _MixedWorker:
+            def resume_session(self, plan, allocation, session_ref):
+                return None
+
+            def observe_session(self, session_ref):
+                if session_ref == first_orphan["session_ref"]:
+                    raise RuntimeError("observe transport failed")
+                return "running"
+
+        middleware = EvaluationMiddleware(self.repository)
+        dispatcher = self._make_orphan_dispatcher(middleware, _MixedWorker())
+        dispatcher.recover_once(now=BASE_TIME)
+        # The failing first orphan stays open but records an event.
+        first_still = self.repository.get_orphan_session(first_orphan["orphan_id"])
+        self.assertEqual(first_still["status"], "open")
+        first_events = self.repository.state_events(first_orphan["orphan_id"])
+        self.assertTrue(
+            any(
+                event["event_type"] == "OrphanObserveFailed"
+                and event["payload"].get("attempt_id") == first["attempt_id"]
+                for event in first_events
+            )
+        )
+        # The next orphan is still processed normally.
+        second_now = self.repository.get_orphan_session(second_orphan["orphan_id"])
+        self.assertEqual(second_now["status"], "open")
+        self.assertEqual(
+            second_now["metadata"]["last_observed_status"], "running"
+        )
+
 
 
 if __name__ == "__main__":
