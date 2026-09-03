@@ -634,6 +634,12 @@ class EvaluationMiddleware:
         candidates = self._repository.list_reconciling_attempts_for_wall_proof()
         if not candidates:
             return []
+        multiplier = 1.7
+        if self._project_root is not None:
+            try:
+                multiplier = resolve_governed_scheduling_policy(self._project_root).kill_multiplier
+            except SchedulingPolicyError:
+                pass
         proofs: dict[str, int] = {}
         unreadable_budget_ids: set[str] = set()
         for candidate in candidates:
@@ -661,7 +667,7 @@ class EvaluationMiddleware:
             ):
                 unreadable_budget_ids.add(candidate["attempt_id"])
                 continue
-            proofs[candidate["attempt_id"]] = int(1.7 * max_wall)
+            proofs[candidate["attempt_id"]] = int(multiplier * max_wall)
         results = self._repository.auto_release_wall_budget(proofs, now=now)
         for result in results:
             if (

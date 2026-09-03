@@ -631,7 +631,7 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             if item["event_type"] == "AttemptLost"
         ][-1]
         self.assertEqual(event["payload"]["source"], "auto:wall-proof")
-        self.assertEqual(event["payload"]["proof_seconds"], 2100)
+        self.assertEqual(event["payload"]["proof_seconds"], 1530)
         self.assertEqual(event["payload"]["claimed_at"], results[0]["claimed_at"])
         self.assertEqual(event["payload"]["age_seconds"], results[0]["age_seconds"])
 
@@ -639,7 +639,7 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         boundary = self._reconciling_attempt(now=BASE_TIME)
         middleware = EvaluationMiddleware(self.repository)
         self.assertEqual(
-            middleware.auto_release_wall_budget(now=BASE_TIME + timedelta(seconds=2100)),
+            middleware.auto_release_wall_budget(now=BASE_TIME + timedelta(seconds=1400)),
             [],
         )
         self.assertEqual(self.repository.get_attempt(boundary["attempt_id"])["status"], "reconciling")
@@ -1345,16 +1345,16 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             columns = {row[1] for row in connection.execute("PRAGMA table_info(evaluations)")}
             versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
         self.assertNotIn("origin", columns)
-        self.assertEqual(versions, {12, 13, 14})
+        self.assertEqual(versions, {12, 13, 14, 16})
 
         SQLiteEvaluationRepository(self.database)
         with closing(sqlite3.connect(self.database)) as connection:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(evaluations)")}
             versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
         self.assertIn("origin", columns)
-        for version in (12, 13, 14, 15):
+        for version in (12, 13, 14, 15, 16):
             self.assertIn(version, versions)
-        self.assertEqual(SCHEMA_VERSION, 15)
+        self.assertEqual(SCHEMA_VERSION, 16)
 
 
 if __name__ == "__main__":

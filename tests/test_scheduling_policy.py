@@ -36,6 +36,11 @@ def policy_body() -> dict:
         "aging_quantum_seconds": 3600,
         "preparation_claim_seconds": 120,
         "option_policy": "throughput",
+        "kill_multiplier": 1.7,
+        "stall_fraction": 0.25,
+        "min_budget_samples": 5,
+        "kill_rate_widen_threshold": 0.10,
+        "kill_widen_factor": 1.5,
     }
 
 
