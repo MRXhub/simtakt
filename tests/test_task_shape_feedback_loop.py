@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
@@ -22,7 +23,7 @@ from control_plane.core.evaluation_contracts import (
     make_evaluation_request,
     make_problem_definition,
 )
-from control_plane.data.sqlite_evaluation_repository import SQLiteEvaluationRepository
+from control_plane.data.sqlite_evaluation_repository import RepositoryError, SQLiteEvaluationRepository
 from control_plane.evaluation.compute_profile import make_feedback_observation
 from control_plane.evaluation.execution_options import (
     make_execution_option,
@@ -33,6 +34,8 @@ from control_plane.evaluation.execution_options import (
 )
 from control_plane.evaluation.execution_planning import materialize_session_plan
 from control_plane.evaluation.scheduling import make_resource_allocation, schedule
+from control_plane.evaluation.service import EvaluationMiddleware
+from control_plane.simulation.adapter_catalog import AdapterCatalogError
 
 
 REVISION = "sha256:" + "1" * 64
@@ -341,6 +344,90 @@ class TaskShapeFeedbackLoopTests(unittest.TestCase):
         self.assertEqual(shape1["sample_count"], 3)
         self.assertEqual(shape2["sample_count"], 2)
         self.assertEqual(shape1["task_class_key"], shape2["task_class_key"])
+
+
+class CompletedAttemptQualificationTests(TaskShapeFeedbackLoopTests):
+    """Qualification gate over completed Attempts.
+
+    ``_qualify_completed_attempt`` runs through EvaluationMiddleware right after
+    ``complete_attempt`` moves an Evaluation to ``qualifying``.  When the
+    configured adapter cannot produce a qualification report -- qualify raises,
+    returns a non-Mapping, or no adapter resolves -- the Evaluation must be
+    marked unresolved with a ``qualification-failed:`` reason.  A
+    RepositoryError raised by the adapter must instead propagate unchanged.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._qualify_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._qualify_dir.cleanup)
+
+    def _middleware(self) -> EvaluationMiddleware:
+        return EvaluationMiddleware(self.repo, project_root=Path(self._qualify_dir.name))
+
+    def _completed_attempt(self) -> tuple[dict, dict]:
+        attempt = self._prepare()
+        completed, _, _ = self._complete(attempt)
+        return attempt, completed
+
+    def _qualify(self, *, resolve_adapter_effect) -> dict:
+        attempt, completed = self._completed_attempt()
+        middleware = self._middleware()
+        with mock.patch(
+            "control_plane.evaluation.service.resolve_adapter",
+            side_effect=resolve_adapter_effect,
+        ):
+            middleware._qualify_completed_attempt(
+                attempt["attempt_id"], ("artifact.completed",), completed
+            )
+        return self.repo.get_evaluation(attempt["evaluation_id"])
+
+    @staticmethod
+    def _adapter(qualify_impl: object) -> types.SimpleNamespace:
+        return types.SimpleNamespace(
+            adapter=types.SimpleNamespace(qualify=qualify_impl),
+        )
+
+    def test_adapter_qualify_exception_resolves_evaluation_unresolved(self) -> None:
+        def explode(*_args, **_kwargs):
+            raise RuntimeError("adapter exploded")
+        evaluation = self._qualify(
+            resolve_adapter_effect=lambda _root, _id: self._adapter(explode)
+        )
+        self.assertEqual(evaluation["status"], "unresolved")
+
+    def test_adapter_qualify_non_mapping_resolves_evaluation_unresolved(self) -> None:
+        # A qualification "report" that is not a Mapping violates the contract
+        # and must resolve the Evaluation unresolved rather than crash.
+        evaluation = self._qualify(
+            resolve_adapter_effect=lambda _root, _id: self._adapter(
+                lambda *_a, **_k: ["not", "a", "mapping"]
+            )
+        )
+        self.assertEqual(evaluation["status"], "unresolved")
+
+    def test_adapter_not_configured_resolves_evaluation_unresolved(self) -> None:
+        # When no adapter resolves for the attempt's simulation adapter the
+        # Evaluation is unresolved rather than left stuck in ``qualifying``.
+        evaluation = self._qualify(
+            resolve_adapter_effect=AdapterCatalogError("adapter root is not configured")
+        )
+        self.assertEqual(evaluation["status"], "unresolved")
+
+    def test_qualification_repository_error_propagates(self) -> None:
+        # A RepositoryError raised while qualifying must surface to the caller
+        # (it is a storage/integrity failure, not a qualification verdict).
+        attempt, completed = self._completed_attempt()
+        middleware = self._middleware()
+        adapter = self._adapter(lambda *_a, **_k: (_ for _ in ()).throw(RepositoryError("repo down")))
+        with mock.patch(
+            "control_plane.evaluation.service.resolve_adapter", return_value=adapter
+        ):
+            with self.assertRaises(RepositoryError):
+                middleware._qualify_completed_attempt(
+                    attempt["attempt_id"], ("artifact.completed",), completed
+                )
+        self.assertEqual(self.repo.get_evaluation(attempt["evaluation_id"])["status"], "qualifying")
 
 
 if __name__ == "__main__":
