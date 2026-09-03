@@ -38,6 +38,10 @@ _POLICY_FIELDS = frozenset(
         "min_budget_samples",
         "kill_rate_widen_threshold",
         "kill_widen_factor",
+        "reconcile_hold_seconds",
+        "orphan_ttl_seconds",
+        "orphans_hold_license",
+        "orphan_batch_size",
     }
 )
 _POLICY_OPTIONAL_FIELDS = frozenset(
@@ -47,6 +51,10 @@ _POLICY_OPTIONAL_FIELDS = frozenset(
         "min_budget_samples",
         "kill_rate_widen_threshold",
         "kill_widen_factor",
+        "reconcile_hold_seconds",
+        "orphan_ttl_seconds",
+        "orphans_hold_license",
+        "orphan_batch_size",
     }
 )
 _REQUIRED_CAPACITY_FIELDS = frozenset(
@@ -108,13 +116,12 @@ def _priority_order(value: Any) -> list[str]:
         )
     return priorities
 
-
 def validate_scheduling_policy(value: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and copy the complete immutable SchedulingPolicy contract."""
-
-    if not isinstance(value, Mapping) or set(value) not in (
-        _POLICY_FIELDS,
-        _POLICY_FIELDS - _POLICY_OPTIONAL_FIELDS,
+    if (
+        not isinstance(value, Mapping)
+        or not (_POLICY_FIELDS - _POLICY_OPTIONAL_FIELDS).issubset(set(value))
+        or not set(value).issubset(_POLICY_FIELDS)
     ):
         raise SchedulingPolicyError(
             "SchedulingPolicy contains missing or unknown fields"
@@ -168,6 +175,12 @@ def validate_scheduling_policy(value: Mapping[str, Any]) -> dict[str, Any]:
     stall_fraction = value.get("stall_fraction", 0.25)
     threshold = value.get("kill_rate_widen_threshold", 0.10)
     widen_factor = value.get("kill_widen_factor", 1.5)
+    reconcile_hold_seconds = _positive_integer(value.get("reconcile_hold_seconds", 1800), "reconcile_hold_seconds")
+    orphan_ttl_seconds = _positive_integer(value.get("orphan_ttl_seconds", 604800), "orphan_ttl_seconds")
+    orphans_hold_license = value.get("orphans_hold_license", True)
+    if not isinstance(orphans_hold_license, bool):
+        raise SchedulingPolicyError("orphans_hold_license must be boolean")
+    orphan_batch_size = _positive_integer(value.get("orphan_batch_size", 10), "orphan_batch_size")
     for item, label in (
         (kill_multiplier, "kill_multiplier"),
         (stall_fraction, "stall_fraction"),
@@ -194,6 +207,10 @@ def validate_scheduling_policy(value: Mapping[str, Any]) -> dict[str, Any]:
         "min_budget_samples": min_samples,
         "kill_rate_widen_threshold": float(threshold),
         "kill_widen_factor": float(widen_factor),
+        "reconcile_hold_seconds": reconcile_hold_seconds,
+        "orphan_ttl_seconds": orphan_ttl_seconds,
+        "orphans_hold_license": orphans_hold_license,
+        "orphan_batch_size": orphan_batch_size,
     }
     if (
         normalized["schema_version"] != 1
@@ -326,6 +343,21 @@ class GovernedSchedulingPolicy:
     @property
     def preparation_claim_seconds(self) -> int:
         return int(self.as_mapping()["preparation_claim_seconds"])
+    @property
+    def reconcile_hold_seconds(self) -> int:
+        return int(self.as_mapping()["reconcile_hold_seconds"])
+
+    @property
+    def orphan_ttl_seconds(self) -> int:
+        return int(self.as_mapping()["orphan_ttl_seconds"])
+
+    @property
+    def orphans_hold_license(self) -> bool:
+        return bool(self.as_mapping()["orphans_hold_license"])
+
+    @property
+    def orphan_batch_size(self) -> int:
+        return int(self.as_mapping()["orphan_batch_size"])
 
     @property
     def option_policy(self) -> str:
