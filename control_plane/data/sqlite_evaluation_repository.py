@@ -60,7 +60,7 @@ _CAPACITY_HOLDING_ATTEMPT_STATES_SQL = attempt_states_sql(CAPACITY_HOLDING_ATTEM
 _HEARTBEATABLE_ATTEMPT_STATES_SQL = attempt_states_sql(HEARTBEATABLE_ATTEMPT_STATES)
 
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 _SHA256_REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -476,6 +476,26 @@ class SQLiteEvaluationRepository:
                             FOREIGN KEY (problem_id, problem_revision)
                                 REFERENCES problem_definitions(problem_id, revision)
                         )"""
+                    )
+                    connection.execute(
+                        """CREATE TABLE IF NOT EXISTS orphan_sessions (
+                            orphan_id TEXT PRIMARY KEY,
+                            attempt_id TEXT NOT NULL UNIQUE,
+                            evaluation_id TEXT NOT NULL,
+                            session_ref TEXT NOT NULL,
+                            reason TEXT NOT NULL,
+                            status TEXT NOT NULL DEFAULT 'open',
+                            metadata_json TEXT NOT NULL DEFAULT '{}',
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            expires_at TEXT,
+                            FOREIGN KEY (attempt_id) REFERENCES attempts(attempt_id),
+                            FOREIGN KEY (evaluation_id) REFERENCES evaluations(evaluation_id)
+                        )"""
+                    )
+                    connection.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_orphan_sessions_status "
+                        "ON orphan_sessions(status, created_at)"
                     )
                     study_columns = {
                         str(row["name"])
@@ -2786,12 +2806,6 @@ class SQLiteEvaluationRepository:
                     raise RepositoryError(
                         "Attempt claim event contains an invalid timestamp"
                     ) from exc
-                if claimed.tzinfo is None:
-                    raise RepositoryError("Attempt claim event timestamp lacks timezone")
-                age = (
-                    current.astimezone(timezone.utc)
-                    - claimed.astimezone(timezone.utc)
-                ).total_seconds()
                 proof_seconds = proof_seconds_by_attempt[attempt_id]
                 if age <= proof_seconds:
                     # A live proof window is intentionally absent from the
@@ -2812,6 +2826,18 @@ class SQLiteEvaluationRepository:
                     payload=payload,
                     created_at=timestamp,
                 )
+                if row["session_ref"]:
+                    connection.execute(
+                        """INSERT OR IGNORE INTO orphan_sessions
+                           (orphan_id,attempt_id,evaluation_id,session_ref,reason,status,
+                            metadata_json,created_at,updated_at,expires_at)
+                           VALUES (?,?,?,?,?,'open',?,?,?,?,?)""",
+                        (
+                            str(uuid.uuid4()), attempt_id, row["evaluation_id"],
+                            row["session_ref"], "wall-budget-elapsed",
+                            canonical_json(payload), timestamp, timestamp, None,
+                        ),
+                    )
                 records.append(
                     {
                         "attempt_id": attempt_id,
@@ -5076,6 +5102,98 @@ class SQLiteEvaluationRepository:
         if row is None:
             raise RepositoryError(f"unknown Attempt: {attempt_id}")
         return self._attempt_record(row)
+
+    def record_orphan_session(
+        self,
+        *,
+        attempt_id: str,
+        reason: str,
+        metadata: Mapping[str, Any] | None = None,
+        expires_at: datetime | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Persist an externally running session whose Attempt was released."""
+        current = _utc_now() if now is None else now
+        if current.tzinfo is None:
+            raise RepositoryError("timestamps must be timezone-aware")
+        timestamp = _iso(current)
+        explanation = normalize_token(reason, "reason")
+        encoded_meta = canonical_json(dict(metadata or {}))
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT attempt_id,evaluation_id,session_ref FROM attempts WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None:
+                raise RepositoryError(f"unknown Attempt: {attempt_id}")
+            if not row["session_ref"]:
+                raise RepositoryError("orphan session requires session_ref")
+            orphan_id = str(uuid.uuid4())
+            connection.execute(
+                """INSERT INTO orphan_sessions
+                   (orphan_id,attempt_id,evaluation_id,session_ref,reason,status,
+                    metadata_json,created_at,updated_at,expires_at)
+                   VALUES (?,?,?,?,?,'open',?,?,?,?,?)""",
+                (orphan_id, attempt_id, row["evaluation_id"], row["session_ref"],
+                 explanation, encoded_meta, timestamp, timestamp,
+                 None if expires_at is None else _iso(expires_at)),
+            )
+        return self.get_orphan_session(orphan_id)
+
+    def get_orphan_session(self, orphan_id: str) -> dict[str, Any]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM orphan_sessions WHERE orphan_id=?", (orphan_id,)
+            ).fetchone()
+        if row is None:
+            raise RepositoryError(f"unknown orphan session: {orphan_id}")
+        return self._orphan_record(row)
+
+    def list_orphan_sessions(self, status: str | None = None) -> list[dict[str, Any]]:
+        with closing(self._connect()) as connection:
+            if status is None:
+                rows = connection.execute(
+                    "SELECT * FROM orphan_sessions ORDER BY created_at, orphan_id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM orphan_sessions WHERE status=? ORDER BY created_at, orphan_id",
+                    (normalize_token(status, "status"),),
+                ).fetchall()
+        return [self._orphan_record(row) for row in rows]
+
+    def update_orphan_session(
+        self, orphan_id: str, *, status: str, metadata: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        timestamp = _iso(_utc_now() if now is None else now)
+        normalized = normalize_token(status, "status")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM orphan_sessions WHERE orphan_id=?", (orphan_id,)
+            ).fetchone()
+            if row is None:
+                raise RepositoryError(f"unknown orphan session: {orphan_id}")
+            payload = row["metadata_json"] if metadata is None else canonical_json(dict(metadata))
+            connection.execute(
+                "UPDATE orphan_sessions SET status=?,metadata_json=?,updated_at=? WHERE orphan_id=?",
+                (normalized, payload, timestamp, orphan_id),
+            )
+        return self.get_orphan_session(orphan_id)
+
+    def _orphan_record(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "orphan_id": str(row["orphan_id"]),
+            "attempt_id": str(row["attempt_id"]),
+            "evaluation_id": str(row["evaluation_id"]),
+            "session_ref": str(row["session_ref"]),
+            "reason": str(row["reason"]),
+            "status": str(row["status"]),
+            "metadata": _safe_json_object(row["metadata_json"]) or {},
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "expires_at": row["expires_at"],
+        }
 
     def list_evaluation_attempts(
         self, evaluation_id: str
