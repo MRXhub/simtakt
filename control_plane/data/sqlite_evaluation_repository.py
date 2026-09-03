@@ -2675,13 +2675,14 @@ class SQLiteEvaluationRepository:
                             if row["execution_plan_json"] is None
                             else _safe_json_object(row["execution_plan_json"])
                         ),
-                        "claimed_at": (
-                            None if claim_event is None else str(claim_event["created_at"])
+                        "wall_budget": (
+                            None
+                            if row["wall_budget_json"] is None
+                            else _safe_json_object(row["wall_budget_json"])
                         ),
+                        "claimed_at": None if claim_event is None else str(claim_event["created_at"]),
                     }
                 )
-        return candidates
-
     def has_reconciling_attempts_for_wall_proof(self) -> bool:
         """Cheap read-only hint for whether wall-budget recovery may apply."""
         with closing(self._connect()) as connection:
@@ -2698,6 +2699,7 @@ class SQLiteEvaluationRepository:
         proof_seconds_by_attempt: Mapping[str, int],
         *,
         now: datetime | None = None,
+        reconcile_hold_seconds: int | None = None,
     ) -> list[dict[str, Any]]:
         """Release only reconciling Attempts whose caller-provided proof elapsed.
 
@@ -2812,7 +2814,20 @@ class SQLiteEvaluationRepository:
                     current.astimezone(timezone.utc)
                     - claimed.astimezone(timezone.utc)
                 ).total_seconds()
-                proof_seconds = proof_seconds_by_attempt[attempt_id]
+                proof_seconds = proof_seconds_by_attempt.get(attempt_id)
+                if proof_seconds is None:
+                    proof_seconds = reconcile_hold_seconds
+                if proof_seconds is None:
+                    records.append(
+                        {
+                            "attempt_id": attempt_id,
+                            "evaluation_id": str(row["evaluation_id"]),
+                            "status": "skipped",
+                            "reason": "proof_seconds-not-supplied",
+                            "source": "auto:wall-proof",
+                        }
+                    )
+                    continue
                 if age <= proof_seconds:
                     # A live proof window is intentionally absent from the
                     # processing receipt: no lifecycle action occurred.

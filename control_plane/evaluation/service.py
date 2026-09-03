@@ -635,9 +635,12 @@ class EvaluationMiddleware:
         if not candidates:
             return []
         multiplier = 1.7
+        reconcile_hold_seconds = None
         if self._project_root is not None:
             try:
-                multiplier = resolve_governed_scheduling_policy(self._project_root).kill_multiplier
+                governed_policy = resolve_governed_scheduling_policy(self._project_root)
+                multiplier = governed_policy.kill_multiplier
+                reconcile_hold_seconds = governed_policy.reconcile_hold_seconds
             except SchedulingPolicyError:
                 pass
         proofs: dict[str, int] = {}
@@ -666,9 +669,10 @@ class EvaluationMiddleware:
                 or command_timeout < 1
             ):
                 unreadable_budget_ids.add(candidate["attempt_id"])
-                continue
-            proofs[candidate["attempt_id"]] = int(multiplier * max_wall)
-        results = self._repository.auto_release_wall_budget(proofs, now=now)
+                proofs[candidate["attempt_id"]] = int(multiplier * max_wall)
+        results = self._repository.auto_release_wall_budget(
+            proofs, now=now, reconcile_hold_seconds=reconcile_hold_seconds
+        )
         for result in results:
             if (
                 result.get("attempt_id") in unreadable_budget_ids
