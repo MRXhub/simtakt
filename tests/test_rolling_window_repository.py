@@ -1549,6 +1549,85 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             any(event["event_type"] == "AttemptDiscardedDuplicate" for event in events)
         )
 
+    def test_late_harvest_requests_termination_of_running_duplicate(self) -> None:
+        """A late-harvest winner terminates the running duplicate in-tx."""
+        submission = self.submit()
+        attempt1, orphan1 = self._lost_orphan_attempt(submission)
+        evaluation_id = orphan1["evaluation_id"]
+        middleware = EvaluationMiddleware(self.repository)
+        self.assertEqual(
+            middleware.auto_requeue_recovering(now=BASE_TIME + timedelta(seconds=1))[0]["status"],
+            "queued",
+        )
+        second = self.lease(
+            self.prepare(submission, window_limit=2, now=BASE_TIME + timedelta(seconds=1)),
+            now=BASE_TIME + timedelta(seconds=1),
+        )
+        self.repository.confirm_attempt_start(
+            second["attempt_id"], WORKER, now=BASE_TIME + timedelta(seconds=1)
+        )
+        self.assertEqual(
+            self.repository.get_attempt(second["attempt_id"])["status"], "running"
+        )
+        # The late harvest wins the qualification race while the duplicate is
+        # still running; within the same transaction the duplicate is released
+        # as lost and a ``late-harvest``-sourced termination is requested so
+        # recovery can terminate its lingering session.
+        outcome = self.repository.complete_orphan_attempt(
+            attempt1["attempt_id"], WORKER, ["evidence.late.harvest"],
+            now=BASE_TIME + timedelta(seconds=2),
+        )
+        self.assertEqual(outcome["harvest_status"], "harvested")
+        duplicate = self.repository.get_attempt(second["attempt_id"])
+        self.assertEqual(duplicate["status"], "lost")
+        self.assertEqual(duplicate["termination_state"], "requested")
+        lost_events = [
+            event
+            for event in self.repository.state_events(second["attempt_id"])
+            if event["event_type"] == "AttemptLost"
+        ]
+        self.assertTrue(lost_events)
+        self.assertEqual(lost_events[-1]["payload"].get("source"), "late-harvest")
+        self.assertEqual(lost_events[-1]["payload"].get("reason"), "late-harvest-winner")
+        self.assertEqual(lost_events[-1]["payload"].get("superseded_by_attempt_id"),
+                         attempt1["attempt_id"])
+        self.assertEqual(
+            self.repository.get_evaluation(evaluation_id)["status"], "qualifying"
+        )
+
+        # A fake worker terminating the duplicate's session confirms the
+        # requested termination; the duplicate stays lost and the Evaluation
+        # remains qualifying/qualified after further recovery.
+        class _TerminatingWorker:
+            def terminate_session(self, _session_ref: str) -> str:
+                return "terminated"
+        dispatcher = SessionLifecycleDispatcher(
+            middleware, mock.Mock(), _TerminatingWorker(),
+            dispatcher_id="dispatcher:late-harvest", lease_seconds=30,
+        )
+        # The late-harvested Attempt's own session also carried a requested
+        # termination from its earlier lost transition, so several recovery
+        # rounds consume each pending termination in order until the duplicate's
+        # request is confirmed.
+        for step in range(5):
+            dispatcher.recover_once(now=BASE_TIME + timedelta(seconds=3 + step))
+            if (
+                self.repository.get_attempt(second["attempt_id"])["termination_state"]
+                == "confirmed"
+            ):
+                break
+        confirmed = self.repository.get_attempt(second["attempt_id"])
+        self.assertEqual(confirmed["status"], "lost")
+        self.assertEqual(confirmed["termination_state"], "confirmed")
+        dispatcher.recover_once(now=BASE_TIME + timedelta(seconds=9))
+        final = self.repository.get_attempt(second["attempt_id"])
+        self.assertEqual(final["status"], "lost")
+        self.assertIn(
+            self.repository.get_evaluation(evaluation_id)["status"],
+            {"qualifying", "qualified"},
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()
