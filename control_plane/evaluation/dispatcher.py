@@ -254,10 +254,7 @@ class SessionLifecycleDispatcher:
                 return True
             return self._terminate_orphan(latest, meta, now)
         if observation == "completed":
-            meta["last_observed_status"] = "completed"
-            meta["last_observed_at"] = _orphan_timestamp(now)
-            update(orphan_id, status="open", metadata=meta, now=now)
-            return True
+            return self._collect_orphan(latest, meta, now)
         # unreachable / indeterminate -> leave the orphan open for a later round.
         return False
 
@@ -285,6 +282,31 @@ class SessionLifecycleDispatcher:
             return normalize_session_observation(observe(session_ref))
         except Exception:
             return None
+
+    def _collect_orphan(
+        self, orphan: Mapping[str, Any], meta: dict[str, Any], now: datetime
+    ) -> bool:
+        """Collect a finished orphan session and harvest its lost Attempt."""
+        orphan_id = str(orphan["orphan_id"])
+        session_ref = orphan.get("session_ref")
+        collect = getattr(self.worker, "collect_session", None)
+        harvest = getattr(self.middleware, "harvest_orphan_session", None)
+        update = getattr(self.middleware, "update_orphan_session", None)
+        if not session_ref or not callable(collect) or not callable(harvest):
+            # No collection capability: keep the orphan open for a later round.
+            if callable(update) and session_ref:
+                meta["last_observed_status"] = "completed"
+                meta["last_observed_at"] = _orphan_timestamp(now)
+                update(orphan_id, status="open", metadata=meta, now=now)
+            return True
+        try:
+            result, artifact_id = collect(session_ref)
+            harvest(result, self.dispatcher_id, artifact_id, session_ref, now=now)
+        except Exception:
+            # The orphan may already be closed by a committed harvest; never
+            # abort the bounded recovery round.
+            return True
+        return True
 
     def _terminate_orphan(
         self, latest: Mapping[str, Any], meta: dict[str, Any], now: datetime

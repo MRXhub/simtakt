@@ -3894,6 +3894,7 @@ class SQLiteEvaluationRepository:
         *,
         now: datetime | None = None,
         _validated_session_result: bool = False,
+        _skip_terminal_evaluation: bool = False,
         feedback: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         raw_artifacts = [str(item).strip() for item in artifact_ids]
@@ -3948,15 +3949,31 @@ class SQLiteEvaluationRepository:
                 payload={"artifact_ids": artifacts},
                 created_at=timestamp,
             )
-            self._transition_evaluation(
-                connection,
-                evaluation_id=str(row["evaluation_id"]),
-                expected=("running",),
-                target="qualifying",
-                event_type="QualificationStarted",
-                payload={"attempt_id": attempt_id},
-                created_at=timestamp,
-            )
+            if _skip_terminal_evaluation:
+                self._state_event(
+                    connection,
+                    aggregate_type="attempt",
+                    aggregate_id=attempt_id,
+                    from_status="completed",
+                    to_status="completed",
+                    event_type="AttemptDiscardedDuplicate",
+                    payload={
+                        "reason": "discarded_duplicate",
+                        "artifact_ids": artifacts,
+                        "evaluation_id": str(row["evaluation_id"]),
+                    },
+                    created_at=timestamp,
+                )
+            else:
+                self._transition_evaluation(
+                    connection,
+                    evaluation_id=str(row["evaluation_id"]),
+                    expected=("running",),
+                    target="qualifying",
+                    event_type="QualificationStarted",
+                    payload={"attempt_id": attempt_id},
+                    created_at=timestamp,
+                )
             if feedback is not None:
                 if not isinstance(feedback, Mapping) or not bool(feedback.get("success")):
                     raise RepositoryError("completed Attempt feedback must be successful")
@@ -5200,6 +5217,17 @@ class SQLiteEvaluationRepository:
         if row is None:
             raise RepositoryError(f"unknown orphan session: {orphan_id}")
         return self._orphan_record(row)
+
+    def find_orphan_by_session_ref(self, session_ref: str) -> dict[str, Any] | None:
+        """Return the single open orphan bound to a session reference, if any."""
+        normalized = normalize_token(session_ref, "session_ref")
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM orphan_sessions WHERE session_ref=? AND status='open' "
+                "ORDER BY created_at, orphan_id LIMIT 1",
+                (normalized,),
+            ).fetchone()
+        return None if row is None else self._orphan_record(row)
 
     def list_orphan_sessions(self, status: str | None = None) -> list[dict[str, Any]]:
         with closing(self._connect()) as connection:

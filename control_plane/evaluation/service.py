@@ -853,6 +853,13 @@ class EvaluationMiddleware:
             observation = self._terminal_feedback(
                 feedback=feedback, success=True, solver_run_records=normalized.get("solver_run_records")
             )
+            evaluation = self._repository.get_evaluation(str(attempt["evaluation_id"]))
+            # Reverse race: a late harvest of an earlier orphaned Attempt may
+            # already have resolved this Evaluation.  The duplicate still
+            # completes normally (collecting -> completed) but must not reopen
+            # qualification; a ``discarded_duplicate`` state event records the
+            # late winner without raising.
+            already_resolved = str(evaluation.get("status")) != "running"
             completed = self._repository.complete_attempt(
                 normalized["attempt_id"],
                 worker_id,
@@ -860,10 +867,12 @@ class EvaluationMiddleware:
                 now=now,
                 _validated_session_result=True,
                 feedback=observation,
+                _skip_terminal_evaluation=already_resolved,
             )
-            self._qualify_completed_attempt(
-                normalized["attempt_id"], tuple(artifacts), completed
-            )
+            if not already_resolved:
+                self._qualify_completed_attempt(
+                    normalized["attempt_id"], tuple(artifacts), completed
+                )
             return completed
         if normalized["status"] == "exhausted":
             observation = self._terminal_feedback(
@@ -886,6 +895,70 @@ class EvaluationMiddleware:
             reason="proxy-session-indeterminate",
             now=now,
         )
+
+    def harvest_orphan_session(
+        self,
+        result: Mapping[str, Any],
+        worker_id: str,
+        result_artifact_id: str,
+        session_ref: str,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Settle one lost orphan Attempt whose still-running session completed.
+
+        Validates that the collected SessionResult binds to the orphaned
+        Attempt (the same check ``complete_session`` performs), then runs the
+        repository evaluation-status CAS: a still-harvestable Evaluation moves
+        to ``qualifying`` through the existing qualify path, while an already
+        resolved Evaluation only records ``discarded_duplicate``.
+        """
+        normalized = validate_simulation_session_result(result)
+        if normalized["status"] != "completed":
+            raise RepositoryError(
+                "only a completed session result can be orphan-harvested"
+            )
+        if normalized["session_ref"] != str(session_ref):
+            raise RepositoryError(
+                "harvested session_ref does not match the orphan session"
+            )
+        orphan = self._repository.find_orphan_by_session_ref(
+            normalized["session_ref"]
+        )
+        if orphan is None:
+            raise RepositoryError(
+                "no open orphan session matches the collected session result"
+            )
+        attempt = self._repository.get_attempt(str(orphan["attempt_id"]))
+        if (
+            attempt["execution_plan_id"] != normalized["plan_id"]
+            or attempt["session_ref"] != normalized["session_ref"]
+        ):
+            raise RepositoryError("session result does not match the bound Attempt")
+        artifacts = sorted(
+            {
+                normalize_artifact_id(result_artifact_id, "result_artifact_id"),
+                normalized["journal_artifact_id"],
+                *normalized["evidence_artifact_ids"],
+            }
+        )
+        observation = self._terminal_feedback(
+            feedback=None,
+            success=True,
+            solver_run_records=normalized.get("solver_run_records"),
+        )
+        outcome = self._repository.complete_orphan_attempt(
+            str(attempt["attempt_id"]),
+            worker_id,
+            artifacts,
+            feedback=observation,
+            now=now,
+        )
+        if outcome.get("harvest_status") == "harvested":
+            self._qualify_completed_attempt(
+                str(attempt["attempt_id"]), tuple(artifacts), outcome["attempt"]
+            )
+        return outcome
 
     def _qualify_completed_attempt(
         self,
