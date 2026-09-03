@@ -1512,8 +1512,14 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         self.repository.confirm_attempt_start(
             second["attempt_id"], WORKER, now=BASE_TIME + timedelta(seconds=1)
         )
+        # The duplicate has already finished running and begun collection when
+        # the late harvest lands; it is no longer a running/reconciling sibling
+        # that the harvest releases, so its completion must still be tolerated.
+        self.repository.begin_collection(
+            second["attempt_id"], WORKER, now=BASE_TIME + timedelta(seconds=2)
+        )
         # Late harvest arrives first: attempt1 completes and the Evaluation
-        # moves to qualifying while the duplicate attempt is still running.
+        # moves to qualifying while the duplicate attempt is collecting.
         outcome = self.repository.complete_orphan_attempt(
             attempt1["attempt_id"], WORKER, ["evidence.late.harvest"],
             now=BASE_TIME + timedelta(seconds=2),
@@ -1522,9 +1528,6 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.get_evaluation(evaluation_id)["status"], "qualifying")
 
         # The duplicate now completes normally; the reverse race must not raise.
-        self.repository.begin_collection(
-            second["attempt_id"], WORKER, now=BASE_TIME + timedelta(seconds=2)
-        )
         running = self.repository.get_attempt(second["attempt_id"])
         result = make_simulation_session_result(
             plan_id=running["execution_plan_id"],

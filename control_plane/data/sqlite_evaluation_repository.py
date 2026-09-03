@@ -5276,9 +5276,12 @@ class SQLiteEvaluationRepository:
         doubles as the evaluation-status CAS.  When the Evaluation is still
         harvestable the Attempt transitions ``lost`` -> ``completed`` with a
         ``late-harvest`` state event and the Evaluation moves to ``qualifying``
-        while its open orphan is recorded ``harvested`` and closed.  When the
-        Evaluation is already resolved (another Attempt won the qualification
-        race) no Attempt/Evaluation status changes; only a
+        while its open orphan is recorded ``harvested`` and closed.  Any sibling
+        Attempt of the same Evaluation still running or reconciling is released
+        as lost within that transaction with a ``late-harvest``-sourced
+        termination request, so recovery terminates its lingering session.  When
+        the Evaluation is already resolved (another Attempt won the
+        qualification race) no Attempt/Evaluation status changes; only a
         ``discarded_duplicate`` Attempt state event is appended and the orphan
         is recorded ``discarded`` and closed.
         """
@@ -5374,6 +5377,51 @@ class SQLiteEvaluationRepository:
                     "metadata_json=?, updated_at=? WHERE orphan_id=?",
                     (canonical_json(meta), timestamp, orphan_id),
                 )
+                # The late harvest just won the qualification race, so this
+                # Evaluation is resolved by the harvested Attempt.  Any sibling
+                # Attempt still running or reconciling is now a duplicate whose
+                # results can never qualify; release it as lost inside the same
+                # BEGIN IMMEDIATE transaction and record a termination request
+                # (source ``late-harvest``) so recovery kills its lingering
+                # session.  Later duplicate completions are still tolerated by
+                # the reverse-race complete path and become ``discarded``.
+                duplicate_rows = connection.execute(
+                    """
+                    SELECT * FROM attempts
+                    WHERE evaluation_id = ? AND attempt_id != ?
+                      AND status IN ('running', 'reconciling')
+                    """,
+                    (evaluation_id, attempt_id),
+                ).fetchall()
+                for dup in duplicate_rows:
+                    dup_id = str(dup["attempt_id"])
+                    dup_from = str(dup["status"])
+                    connection.execute(
+                        """
+                        UPDATE attempts
+                        SET status = 'lost', termination_state = 'requested',
+                            lease_owner = NULL, lease_expires_at = NULL,
+                            updated_at = ?
+                        WHERE attempt_id = ?
+                          AND COALESCE(termination_state, '') IN ('', 'requested')
+                        """,
+                        (timestamp, dup_id),
+                    )
+                    self._state_event(
+                        connection,
+                        aggregate_type="attempt",
+                        aggregate_id=dup_id,
+                        from_status=dup_from,
+                        to_status="lost",
+                        event_type="AttemptLost",
+                        payload={
+                            "reason": "late-harvest-winner",
+                            "source": "late-harvest",
+                            "superseded_by_attempt_id": attempt_id,
+                            "worker_id": str(worker_id),
+                        },
+                        created_at=timestamp,
+                    )
                 attempt = self.get_attempt(attempt_id, connection=connection)
                 harvest_status = "harvested"
             else:
