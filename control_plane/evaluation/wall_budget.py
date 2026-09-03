@@ -28,6 +28,32 @@ def _kills(repository: Any, revision: str, fidelity: str | None, target: str | N
     return int(method(revision, fidelity, target))
 
 
+def _degradation_levels(
+    fidelity: str | None, target_id: str | None
+) -> list[tuple[str | None, str | None, str]]:
+    """Yield candidate (fidelity, target, source) queries, most to least specific.
+
+    Only dimensions that are actually present are combined; the tuples are
+    de-duplicated so a fully-absent dimension pair yields exactly one level:
+    ``(None, None, "learned:problem")``.
+    """
+    levels: list[tuple[str | None, str | None, str]] = []
+    if fidelity is not None:
+        if target_id is not None:
+            levels.append((fidelity, target_id, "learned:problem+fidelity+target"))
+        levels.append((fidelity, None, "learned:problem+fidelity"))
+    levels.append((None, None, "learned:problem"))
+    seen: set[tuple[str | None, str | None]] = set()
+    result: list[tuple[str | None, str | None, str]] = []
+    for fidelity_dim, target_dim, source in levels:
+        key = (fidelity_dim, target_dim)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((fidelity_dim, target_dim, source))
+    return result
+
+
 def resolve_wall_budget(
     repository: Any,
     *,
@@ -42,10 +68,13 @@ def resolve_wall_budget(
     minimum = int(_policy(policy, "min_budget_samples", 5))
     selected: list[float] = []
     source = "declared"
-    for f, t, label in ((fidelity, target_id, "learned:problem+fidelity+target"), (fidelity, None, "learned:problem+fidelity"), (None, None, "learned:problem")):
+    selected_fidelity: str | None = None
+    selected_target: str | None = None
+    for f, t, label in _degradation_levels(fidelity, target_id):
         candidate = _samples(repository, problem_revision, f, t)
         if len(candidate) >= minimum:
             selected, source = candidate, label
+            selected_fidelity, selected_target = f, t
             break
     budget = float(declared)
     widened = False
@@ -53,7 +82,9 @@ def resolve_wall_budget(
         ordered = sorted(selected)
         rank = max(1, math.ceil(0.95 * len(ordered))) - 1
         budget = max(budget, ordered[rank], 1.2 * max(ordered), 1.0)
-        kills = _kills(repository, problem_revision, fidelity if source != "learned:problem" else None, target_id if source == "learned:problem+fidelity+target" else None)
+        # The kill-count query shares the same actual dimensions that produced
+        # the selected samples, so (None, None) reports problem-scoped kills.
+        kills = _kills(repository, problem_revision, selected_fidelity, selected_target)
         threshold = float(_policy(policy, "kill_rate_widen_threshold", 0.10))
         if kills / (kills + len(selected)) > threshold:
             budget *= float(_policy(policy, "kill_widen_factor", 1.5))

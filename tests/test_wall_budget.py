@@ -158,16 +158,30 @@ class ResolveWallBudgetUnitTests(unittest.TestCase):
         self.assertEqual(result["source"], "learned:problem")
         self.assertEqual(result["sample_count"], 5)
 
-    def test_sufficient_target_samples_use_most_specific_source(self) -> None:
+    def test_absent_dimensions_degrade_to_learned_problem_source(self) -> None:
+        """Regression: (None, None) fidelity/target must report source
+        ``learned:problem``, not a specificity label borrowed from a dimension
+        that was never present."""
         repo = _FakeSampleRepository(
             samples={
-                (FIDELITY, TARGET): [10.0] * 5,
-                (FIDELITY, None): [20.0] * 5,
-                (None, None): [30.0] * 5,
+                (None, None): [40.0] * 5,
             }
         )
-        result = _resolve(repo)
-        self.assertEqual(result["source"], "learned:problem+fidelity+target")
+        result = _resolve(repo, fidelity=None, target=None)
+        self.assertEqual(result["source"], "learned:problem")
+        self.assertEqual(result["sample_count"], 5)
+
+    def test_only_fidelity_dimension_reports_learned_problem_fidelity(self) -> None:
+        """Regression: with no target, only fidelity and problem levels remain
+        and the absent target is never reintroduced as a bogus specificity."""
+        repo = _FakeSampleRepository(
+            samples={
+                (FIDELITY, None): [60.0] * 5,
+                (None, None): [80.0] * 5,
+            }
+        )
+        result = _resolve(repo, target=None)
+        self.assertEqual(result["source"], "learned:problem+fidelity")
         self.assertEqual(result["sample_count"], 5)
 
     def test_kill_rate_above_threshold_widens_budget_by_one_point_five(self) -> None:
