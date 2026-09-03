@@ -53,6 +53,7 @@ from control_plane.evaluation.compute_profile import (
 from control_plane.evaluation.execution_planning import materialize_session_plan
 from control_plane.evaluation.automation_policy import DEFAULT_AUTOMATION_POLICY, most_conservative
 from control_plane.evaluation.scheduling import SchedulingError, validate_resource_allocation
+from control_plane.evaluation.wall_budget import resolve_wall_budget
 from control_plane.simulation.session_contracts import validate_simulation_session_plan
 
 _ACTIVE_ATTEMPT_STATES_SQL = attempt_states_sql(ACTIVE_ATTEMPT_STATES)
@@ -3509,14 +3510,57 @@ class SQLiteEvaluationRepository:
                 try:
                     plan_budget = json.loads(row["execution_plan_json"]).get("budget", {})
                     declared = int(plan_budget.get("max_wall_seconds", 1))
-                    budget_json = canonical_json({
-                        "budget_seconds": max(1, declared),
-                        "kill_at_seconds": max(1, int(math.ceil(1.7 * declared))),
-                        "stall_seconds": max(1, int(math.ceil(0.25 * declared))),
-                        "source": "declared", "sample_count": 0, "widened": False,
-                    })
                 except (TypeError, ValueError, json.JSONDecodeError):
-                    budget_json = None
+                    plan_budget = None
+                if isinstance(plan_budget, Mapping):
+                    resolved = None
+                    try:
+                        lineage = connection.execute(
+                            """SELECT e.fidelity AS fidelity,
+                                      c.problem_revision AS problem_revision
+                               FROM evaluations e
+                               JOIN candidates c ON c.candidate_id = e.candidate_id
+                               WHERE e.evaluation_id = ?""",
+                            (str(row["evaluation_id"]),),
+                        ).fetchone()
+                        problem_revision = (
+                            None if lineage is None else lineage["problem_revision"]
+                        )
+                        fidelity = None if lineage is None else lineage["fidelity"]
+                        target_id = None
+                        allocation = (
+                            _safe_json_object(row["allocation_json"])
+                            if row["allocation_json"] is not None
+                            else None
+                        )
+                        if isinstance(allocation, Mapping):
+                            target_id = allocation.get("target_id")
+                        if problem_revision:
+                            resolved = canonical_json(
+                                resolve_wall_budget(
+                                    self,
+                                    problem_revision=str(problem_revision),
+                                    fidelity=(
+                                        None if fidelity is None else str(fidelity)
+                                    ),
+                                    target_id=(
+                                        "" if target_id is None else str(target_id)
+                                    ),
+                                    declared_max_wall_seconds=declared,
+                                    policy=None,
+                                )
+                            )
+                    except (RepositoryError, TypeError, ValueError):
+                        resolved = None
+                    if resolved is None:
+                        budget_json = canonical_json({
+                            "budget_seconds": max(1, declared),
+                            "kill_at_seconds": max(1, int(math.ceil(1.7 * declared))),
+                            "stall_seconds": max(1, int(math.ceil(0.25 * declared))),
+                            "source": "declared", "sample_count": 0, "widened": False,
+                        })
+                    else:
+                        budget_json = resolved
             if budget_json is not None:
                 connection.execute(
                     "UPDATE attempts SET wall_budget_json = ?, updated_at = ? WHERE attempt_id = ?",

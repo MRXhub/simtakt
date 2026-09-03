@@ -497,6 +497,74 @@ class WallBudgetRepositoryIntegrationTests(unittest.TestCase):
             1,
         )
 
+    def _complete_wall_sample(self, wall_seconds: float) -> dict:
+        """Drive one successful completed Attempt through the real feedback path."""
+        attempt = self._prepare()
+        self._lease(attempt)
+        self.clock += timedelta(seconds=1)
+        self.repository.confirm_attempt_start(
+            attempt["attempt_id"], WORKER, now=self.clock
+        )
+        self.repository.begin_collection(
+            attempt["attempt_id"], WORKER, now=self.clock
+        )
+        self.repository.complete_attempt(
+            attempt["attempt_id"], WORKER, ["artifact.completed"],
+            _validated_session_result=True, now=self.clock,
+            feedback=make_feedback_observation(
+                success=True, wall_seconds=wall_seconds
+            ),
+        )
+        return attempt
+
+    def test_confirm_start_resolves_learned_budget_from_real_feedback_samples(
+        self,
+    ) -> None:
+        """Launch confirmation learns a wall budget once >=5 real samples exist.
+
+        Regression: resolve_wall_budget is wired into the production startup
+        path.  After 5 successful completed samples are recorded through the
+        real feedback path for the same problem+fidelity+target key, confirming
+        a new Attempt persists a budget whose source starts with ``learned:``,
+        whose ``kill_at_seconds`` equals ``ceil(1.7 * budget_seconds)``, and
+        which is not the declared-source fallback.
+        """
+        # The fixture plan declares max_wall=900 -> declared fallback would be
+        # kill_at = ceil(1.7 * 900) = 1530.  Samples far above 900 make the
+        # learned budget (and therefore its kill_at) exceed that fallback.
+        for _ in range(5):
+            self._complete_wall_sample(5000.0)
+
+        target = self._prepare()
+        self._lease(target)
+        self.clock += timedelta(seconds=1)
+        self.repository.confirm_attempt_start(
+            target["attempt_id"], WORKER, now=self.clock
+        )
+        budget = self.repository.get_attempt(target["attempt_id"])["wall_budget"]
+        self.assertIsNotNone(budget)
+        self.assertTrue(
+            budget["source"].startswith("learned:"),
+            f"expected a learned source, got {budget['source']!r}",
+        )
+        self.assertEqual(budget["sample_count"], 5)
+        self.assertEqual(
+            budget["kill_at_seconds"],
+            math.ceil(1.7 * budget["budget_seconds"]),
+        )
+        self.assertGreater(budget["budget_seconds"], 900)
+        self.assertNotEqual(
+            budget["kill_at_seconds"], math.ceil(1.7 * 900)
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+if __name__ == "__main__":
+    unittest.main()
+
 
 if __name__ == "__main__":
     unittest.main()
