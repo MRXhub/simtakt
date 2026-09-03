@@ -1,4 +1,7 @@
 import json
+import os
+import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -144,6 +147,61 @@ class CompositionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             p = subprocess.run([sys.executable, "-m", "control_plane.runtime", "--project-root", td], capture_output=True, text=True, timeout=10)
         self.assertNotEqual(p.returncode, 0); self.assertIn("runtime cannot start", p.stderr); self.assertNotIn("Traceback", p.stderr)
+
+    def _composed_dispatcher_ids(self, root):
+        """Compose the runtime, capturing every dispatcher_id handed to the dispatcher."""
+        captured = []
+        def fake_dispatcher(*args, **kwargs):
+            captured.append(kwargs.get("dispatcher_id"))
+            return types.SimpleNamespace()
+        patches = [
+            patch.object(comp, "parse_execution_topology", return_value={"formal_target_ids": ["one"]}),
+            patch.object(comp, "resolve_control_plane_database", return_value=root / "x.db"),
+            patch.object(comp, "resolve_governed_scheduling_policy", return_value=object()),
+            patch.object(comp, "SQLiteEvaluationRepository", return_value=types.SimpleNamespace()),
+            patch.object(comp, "EvaluationMiddleware", return_value=object()),
+            patch.object(comp, "PreparedExecutionDispatcher", fake_dispatcher),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        ctx = compose_runtime(root)
+        ctx.close()
+        return captured
+
+    def test_dispatcher_id_default_is_process_scoped_and_differs_across_assemblies(self):
+        # With no explicit override the dispatcher gets an id of the form
+        # ``runtime:<host>:<pid>:<8hex>`` and each assembly draws a fresh random
+        # suffix, so two constructions never share an id.
+        self.install()
+        root = self.root(self.doc())
+        ids = self._composed_dispatcher_ids(root)
+        ids += self._composed_dispatcher_ids(root)
+        self.assertEqual(len(ids), 2)
+        self.assertNotEqual(ids[0], ids[1])
+        pattern = re.compile(
+            r"^runtime:" + re.escape(socket.gethostname()) + r":\d+:[0-9a-f]{8}$"
+        )
+        self.assertTrue(all(pattern.match(item) for item in ids))
+        self.assertTrue(all(item.startswith(f"runtime:{socket.gethostname()}:{os.getpid()}:") for item in ids))
+
+    def test_dispatcher_id_explicit_override_wins(self):
+        # A top-level dispatcher_id in RUNTIME_COMPONENTS.json must replace the
+        # generated process-unique id.
+        self.install()
+        document = self.doc()
+        document["dispatcher_id"] = "explicit-dispatcher-deployment-42"
+        root = self.root(document)
+        ids = self._composed_dispatcher_ids(root)
+        self.assertEqual(ids, ["explicit-dispatcher-deployment-42"])
+
+    def test_dispatcher_id_empty_override_is_rejected(self):
+        # An override that strips to empty must fail closed rather than silently
+        # falling back to a generated id.
+        document = self.doc()
+        document["dispatcher_id"] = "   "
+        with self.assertRaisesRegex(RuntimeCompositionError, "dispatcher_id override must be non-empty"):
+            comp._dispatcher_id(self.root(document), [])
 
 
 if __name__ == "__main__": unittest.main()
