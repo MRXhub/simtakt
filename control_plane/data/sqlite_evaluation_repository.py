@@ -2806,6 +2806,12 @@ class SQLiteEvaluationRepository:
                     raise RepositoryError(
                         "Attempt claim event contains an invalid timestamp"
                     ) from exc
+                if claimed.tzinfo is None:
+                    raise RepositoryError("Attempt claim event timestamp lacks timezone")
+                age = (
+                    current.astimezone(timezone.utc)
+                    - claimed.astimezone(timezone.utc)
+                ).total_seconds()
                 proof_seconds = proof_seconds_by_attempt[attempt_id]
                 if age <= proof_seconds:
                     # A live proof window is intentionally absent from the
