@@ -60,7 +60,7 @@ _CAPACITY_HOLDING_ATTEMPT_STATES_SQL = attempt_states_sql(CAPACITY_HOLDING_ATTEM
 _HEARTBEATABLE_ATTEMPT_STATES_SQL = attempt_states_sql(HEARTBEATABLE_ATTEMPT_STATES)
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 _SHA256_REVISION = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
@@ -422,13 +422,13 @@ class SQLiteEvaluationRepository:
                         connection.execute(
                             "ALTER TABLE attempts ADD COLUMN last_heartbeat_at TEXT"
                         )
-                    problem_columns = {
+                    evaluation_columns = {
                         str(row["name"])
-                        for row in connection.execute("PRAGMA table_info(problem_definitions)")
+                        for row in connection.execute("PRAGMA table_info(evaluations)")
                     }
-                    if "status" not in problem_columns:
+                    if "origin" not in evaluation_columns:
                         connection.execute(
-                            "ALTER TABLE problem_definitions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"
+                            "ALTER TABLE evaluations ADD COLUMN origin TEXT"
                         )
                     connection.execute(
                         """CREATE TABLE IF NOT EXISTS attempt_feedback (
@@ -1415,14 +1415,15 @@ class SQLiteEvaluationRepository:
 
             now = _iso()
             evaluation_id = normalized_request["evaluation_id"]
+            origin = normalized_request.get("origin")
             connection.execute(
                 """
                 INSERT INTO evaluations(
                     evaluation_id, idempotency_key, candidate_id, fidelity,
                     requested_outputs_json, evidence_profile,
                     independence_requirement, priority, request_json, status,
-                    observation_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', NULL, ?, ?)
+                    observation_id, created_at, updated_at, origin
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'requested', NULL, ?, ?, ?)
                 """,
                 (
                     evaluation_id,
@@ -1436,6 +1437,7 @@ class SQLiteEvaluationRepository:
                     canonical_json(normalized_request),
                     now,
                     now,
+                    origin,
                 ),
             )
             self._state_event(

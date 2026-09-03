@@ -334,6 +334,7 @@ def make_evaluation_request(
     replicate_key: str | None = None,
     priority: str = "normal",
     evaluation_id: str | None = None,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     candidate = _text(candidate_id, "candidate_id")
     independence = str(independence_requirement).strip().lower()
@@ -355,7 +356,7 @@ def make_evaluation_request(
         identity["replicate_key"] = normalize_token(
             replicate_key, "replicate_key"
         )
-    return {
+    request = {
         "contract_version": CONTRACT_VERSION,
         "evaluation_id": (
             f"evaluation:{uuid.uuid4()}"
@@ -366,6 +367,12 @@ def make_evaluation_request(
         **identity,
         "priority": _text(priority, "priority"),
     }
+    # origin is advisory request provenance.  It is deliberately excluded from
+    # the idempotency identity above so that the same Evaluation semantics
+    # submitted from different origins still deduplicate to one record.
+    if origin is not None:
+        request["origin"] = normalize_token(origin, "origin")
+    return request
 
 
 def validate_evaluation_request(value: Any) -> dict[str, Any]:
@@ -379,6 +386,7 @@ def validate_evaluation_request(value: Any) -> dict[str, Any]:
         replicate_key=source.get("replicate_key"),
         priority=source.get("priority"),
         evaluation_id=source.get("evaluation_id"),
+        origin=source.get("origin"),
     )
     _require_contract_version(source.get("contract_version"), "EvaluationRequest")
     if str(source.get("idempotency_key", "")).lower() != expected["idempotency_key"]:

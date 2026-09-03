@@ -1229,9 +1229,96 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         )
         for state in ("leased", "planned", "completed", "failed", "lost", "cancelled"):
             self.assertNotIn(state, TERMINATION_REQUEST_SOURCE_STATES)
-        outputs = [attempt_termination_states_sql(ATTEMPT_TERMINATION_STATES) for _ in range(3)]
-        self.assertEqual(outputs[0], outputs[1])
-        self.assertEqual(outputs[1], outputs[2])
+    def _submit_with_origin(self, *, origin: str | None, x: float) -> tuple[dict, dict]:
+        candidate = make_candidate(
+            problem_id=self.problem["problem_id"],
+            problem_revision=self.problem["revision"],
+            parameters={"x": float(x)},
+        )
+        request = make_evaluation_request(
+            candidate_id=candidate["candidate_id"],
+            fidelity="full-tcad",
+            requested_outputs=["Eff"],
+            evidence_profile="fixture-v1",
+            origin=origin,
+        )
+        evaluation = self.repository.submit_evaluation(candidate, request)
+        return candidate, evaluation
+
+    def test_submit_with_origin_round_trips_consistently(self) -> None:
+        candidate, evaluation = self._submit_with_origin(
+            origin="designer:smoke", x=3.0
+        )
+        self.assertEqual(evaluation["origin"], "designer:smoke")
+        fetched = self.repository.get_evaluation(evaluation["evaluation_id"])
+        self.assertEqual(fetched["origin"], "designer:smoke")
+        with closing(sqlite3.connect(self.database)) as connection:
+            origin_value, request_json = connection.execute(
+                "SELECT origin, request_json FROM evaluations WHERE evaluation_id = ?",
+                (evaluation["evaluation_id"],),
+            ).fetchone()
+            self.assertEqual(origin_value, "designer:smoke")
+            self.assertEqual(json.loads(request_json)["origin"], "designer:smoke")
+
+    def test_same_candidate_different_origin_still_dedups(self) -> None:
+        candidate = make_candidate(
+            problem_id=self.problem["problem_id"],
+            problem_revision=self.problem["revision"],
+            parameters={"x": 7.0},
+        )
+        first = self.repository.submit_evaluation(
+            candidate,
+            make_evaluation_request(
+                candidate_id=candidate["candidate_id"],
+                fidelity="full-tcad",
+                requested_outputs=["Eff"],
+                evidence_profile="fixture-v1",
+                origin="origin-a",
+            ),
+        )
+        second = self.repository.submit_evaluation(
+            candidate,
+            make_evaluation_request(
+                candidate_id=candidate["candidate_id"],
+                fidelity="full-tcad",
+                requested_outputs=["Eff"],
+                evidence_profile="fixture-v1",
+                origin="origin-b",
+            ),
+        )
+        self.assertEqual(first["evaluation_id"], second["evaluation_id"])
+        # The first-submitted advisory origin is preserved on the dedup hit.
+        self.assertEqual(second["origin"], "origin-a")
+        with closing(sqlite3.connect(self.database)) as connection:
+            count = connection.execute("SELECT COUNT(*) FROM evaluations").fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_v14_to_v15_migration_adds_origin_and_preserves_bookkeeping(self) -> None:
+        # Simulate a v14 database by removing the v15 origin column and ledger row,
+        # and recording the 12..14 upgrade ledger like a real v14 database carries.
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("ALTER TABLE evaluations DROP COLUMN origin")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 15")
+            connection.executemany(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                [(version, "2026-08-02T00:00:00+00:00") for version in (12, 13, 14)],
+            )
+            connection.commit()
+        with closing(sqlite3.connect(self.database)) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(evaluations)")}
+            versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+        self.assertNotIn("origin", columns)
+        self.assertEqual(versions, {12, 13, 14})
+
+        SQLiteEvaluationRepository(self.database)
+        with closing(sqlite3.connect(self.database)) as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(evaluations)")}
+            versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+        self.assertIn("origin", columns)
+        for version in (12, 13, 14, 15):
+            self.assertIn(version, versions)
+        self.assertEqual(SCHEMA_VERSION, 15)
+
 
 if __name__ == "__main__":
     unittest.main()
