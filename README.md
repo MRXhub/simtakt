@@ -109,6 +109,22 @@ pending session is only confirmed terminated when the worker returns
 [examples/minimal-runtime/README.md](examples/minimal-runtime/README.md) for a
 runnable end-to-end example.
 
+When an attempt's session is still running but the attempt itself is released
+as lost, the control plane keeps an **orphan session** bound to the live
+`session_ref`, so the still-executing job is neither forgotten nor re-run: an
+open orphan whose session is observed still `running` defers re-dispatch, open
+orphans count against license capacity, and a bounded recovery loop re-observes
+them (closing them on absence or TTL expiry, or terminating a session once it
+is safe).  If a still-running orphan session later completes, its collected
+result is **late-harvested** back into the evaluation through an idempotent,
+transactional first-wins check: the first result settles the evaluation while
+any duplicate is recorded as `discarded_duplicate` rather than re-opening
+qualification.  Each prepared option's wall budget can also be **learned** from
+completed samples (with source degradation and automatic widening on the kill
+rate) before falling back to the declared budget.  See the *Wall budgets,
+orphan recovery, and late harvest* section of
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE). If this project is useful in your research, a
