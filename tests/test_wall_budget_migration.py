@@ -40,7 +40,7 @@ class WallBudgetMigrationTests(unittest.TestCase):
                 for row in connection.execute("SELECT version FROM schema_migrations")
             }
         self.assertNotIn("wall_budget_json", attempt_columns)
-        self.assertEqual(versions, {12, 13, 14, 15})
+        self.assertEqual(versions, {12, 13, 14, 15, 17})
 
         SQLiteEvaluationRepository(database)
 
@@ -64,7 +64,7 @@ class WallBudgetMigrationTests(unittest.TestCase):
         for column in ("termination_state", "execution_plan_json", "session_ref"):
             self.assertIn(column, attempt_columns)
         self.assertIn("origin", evaluation_columns)
-        self.assertEqual(SCHEMA_VERSION, 16)
+        self.assertEqual(SCHEMA_VERSION, 17)
 
         # Reopening the already-migrated database is idempotent.
         SQLiteEvaluationRepository(database)

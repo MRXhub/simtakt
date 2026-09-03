@@ -41,6 +41,10 @@ def policy_body() -> dict:
         "min_budget_samples": 5,
         "kill_rate_widen_threshold": 0.10,
         "kill_widen_factor": 1.5,
+        "reconcile_hold_seconds": 1800,
+        "orphan_ttl_seconds": 604800,
+        "orphans_hold_license": True,
+        "orphan_batch_size": 10,
     }
 
 

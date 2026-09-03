@@ -1345,7 +1345,7 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             columns = {row[1] for row in connection.execute("PRAGMA table_info(evaluations)")}
             versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
         self.assertNotIn("origin", columns)
-        self.assertEqual(versions, {12, 13, 14, 16})
+        self.assertEqual(versions, {12, 13, 14, 17})
 
         SQLiteEvaluationRepository(self.database)
         with closing(sqlite3.connect(self.database)) as connection:
@@ -1354,7 +1354,7 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         self.assertIn("origin", columns)
         for version in (12, 13, 14, 15, 16):
             self.assertIn(version, versions)
-        self.assertEqual(SCHEMA_VERSION, 16)
+        self.assertEqual(SCHEMA_VERSION, 17)
 
 
 if __name__ == "__main__":
