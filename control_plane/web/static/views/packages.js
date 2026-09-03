@@ -197,9 +197,17 @@ export function renderPackagesView() {
       };
     });
 
+    const pName = state.packagesPackageName || "pkg-solar-cell-tcad";
+    const artId = `pkg.${pName}`;
+    const pRev = state.packagesSchemaRev || (state.packagesList[0] && state.packagesList[0].revision) || ("sha256:" + "0".repeat(64));
+
     return {
       kind: "parameter-schema",
-      problem_hint: state.packagesPackageName ? `problem:${state.packagesPackageName.replace(/^pkg-/, "")}` : "deck-derived-schema",
+      problem_hint: `problem:${pName.replace(/^pkg-/, "")}`,
+      source_package: {
+        artifact_id: artId,
+        revision: pRev
+      },
       parameters,
       extracts: extracts.map(e => ({ name: e.name, expression: e.expression, line: e.line }))
     };
