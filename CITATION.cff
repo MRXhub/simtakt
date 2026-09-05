@@ -11,4 +11,4 @@ abstract: >-
   simulation and evaluation workloads: immutable evaluation contracts,
   a pure scheduling function, atomic dispatch, durable SQLite-backed
   attempt/session/allocation state, pluggable simulator worker/gateway
-  protocols, and a web status console with a self-contained demo mode.
+  protocols, and a bilingual simulation research workspace with a self-contained demo mode.

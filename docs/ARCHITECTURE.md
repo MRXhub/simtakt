@@ -16,8 +16,10 @@ The control plane is organized into layers with explicit boundaries:
 - **Simulation** owns the runtime-neutral worker, gateway, adapter, and session
   protocols. It is the only layer that needs to know how a particular simulation
   runtime is started, observed, recovered, and collected.
-- **Web** presents read-only status views. It consumes projections from the
-  evaluation services and does not perform scheduling or runtime control.
+- **Web** presents the research workspace and monitoring views. Read-only access
+  is the default; `--allow-writes` enables model import, template registration,
+  study creation and evaluation submission through the service APIs. Scheduling
+  and session execution run in the separate runtime process.
 
 ## Runtime assembly from project files
 
