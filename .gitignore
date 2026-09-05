@@ -25,3 +25,8 @@ CLAUDE.md
 
 # Optional browser-test dependencies.
 node_modules/
+
+# Local container workspaces and site-specific connection overrides.
+/workspace/
+/compose.ssh.yaml
+/deploy/ssh/

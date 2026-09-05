@@ -21,6 +21,9 @@ The control plane is organized into layers with explicit boundaries:
   study creation and evaluation submission through the service APIs. Scheduling
   and session execution run in the separate runtime process.
 
+Practical setup: [Docker deployment](DOCKER.md), [SSH endpoints](SSH_SIMULATION.md),
+and [adapter integration](ADAPTERS.md). These setup guides are currently in Chinese.
+
 ## Runtime assembly from project files
 
 A governed runtime is built by `control_plane.runtime.composition.compose_runtime`
@@ -128,11 +131,14 @@ preparation validated and bound into the immutable preparation.
   session is only confirmed terminated when the worker returns `terminated` or
   `absent`, and a monitor/worker without `terminate_session` reports
   termination as unconfirmed.
-- Measured solve durations flow from worker collection: each `SolverRunRecord`
-  carries `wall_seconds` / `cpu_seconds` / `peak_rss_bytes`; completion feedback
-  writes them to `attempt_feedback`, where multiple solver records are summed
-  for wall/cpu and RSS takes the max, feeding the per-task compute profile.
-  Missing measurements stay `None`.
+- Workers can include `wall_seconds` / `cpu_seconds` / `peak_rss_bytes` in
+  `SolverRunRecord` bodies. When completion feedback is explicitly supplied,
+  missing feedback fields are derived by summing wall/CPU durations and taking
+  the maximum RSS. With `feedback=None`, the current completion path does not
+  create performance feedback; the default dispatcher uses that path. An
+  integration can record verified terminal measurements through
+  `record_attempt_feedback`. Missing measurements stay `None`. See the
+  [adapter guide](ADAPTERS.md) for result and measurement contracts.
 - Preparation itself is a lazy queued phase with bounded claims; a bad input
   releases the claim and marks that evaluation `unresolved` without aborting the
   round.

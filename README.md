@@ -77,6 +77,8 @@ python -m control_plane.web.status_server --project-root /path/to/project --allo
 
 Web 服务默认监听 `127.0.0.1:8321`。写接口目前不提供内置身份认证；需要远程访问时，应通过有身份认证和访问控制的反向代理提供服务。
 
+需要容器部署或接入仿真服务器时，请阅读 [Docker 部署](docs/DOCKER.md)、[仿真端 SSH 接入](docs/SSH_SIMULATION.md)与 [adapter 开发规范](docs/ADAPTERS.md)。
+
 ## 使用流程
 
 | 工作区 | 你在这里做什么 |
@@ -159,6 +161,9 @@ node tests/browser_workbench_smoke.cjs
 
 | 入口 | 内容 |
 | --- | --- |
+| [Docker 部署](docs/DOCKER.md) | 镜像构建、演示与项目模式、持久化和扩展加载。 |
+| [仿真端 SSH 接入](docs/SSH_SIMULATION.md) | OpenSSH 格式、凭据挂载、节点映射与会话恢复约定。 |
+| [Adapter 开发与注册](docs/ADAPTERS.md) | 工厂入口、项目 JSON、Worker 与结果接口。 |
 | [架构与扩展](docs/ARCHITECTURE.md) | 运行时组装、资源约束、恢复语义与扩展接口。 |
 | [准备阶段输入](docs/governed-preparation-inputs.md) | 输入来源、版本绑定及失败规则。 |
 | [中英文术语](docs/UI_TERMINOLOGY.md) | 用户界面命名、技术信息展示规则。 |

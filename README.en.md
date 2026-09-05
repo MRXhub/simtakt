@@ -77,6 +77,8 @@ Replace `/path/to/project` with your directory; quote paths containing spaces. T
 
 The server binds to `127.0.0.1:8321` by default. Write endpoints currently have no built-in authentication. For remote access, use a reverse proxy with authentication and access control.
 
+For container deployment and solver integration, see the [Docker guide](docs/DOCKER.md), [SSH endpoint guide](docs/SSH_SIMULATION.md) and [adapter integration guide](docs/ADAPTERS.md). These detailed guides are currently in Chinese, with configuration examples and Python interfaces.
+
 ## Workflow
 
 | Workspace | Your task |
@@ -159,6 +161,9 @@ The script launches an isolated project and browser. It covers model import, tem
 
 | Guide | Contents |
 | --- | --- |
+| [Docker deployment · 中文](docs/DOCKER.md) | Image builds, demo/project modes, persistence and extensions. |
+| [SSH simulation endpoints · 中文](docs/SSH_SIMULATION.md) | OpenSSH configuration, credential mounts and session recovery. |
+| [Adapter integration · 中文](docs/ADAPTERS.md) | Factories, project JSON, workers and result contracts. |
 | [Architecture and extension points](docs/ARCHITECTURE.md) | Composition, resource constraints, recovery semantics and interfaces. |
 | [Preparation inputs](docs/governed-preparation-inputs.md) | Input sources, version bindings and failure rules. |
 | [UI terminology](docs/UI_TERMINOLOGY.md) | Chinese/English naming and technical disclosure conventions. |

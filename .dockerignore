@@ -1,0 +1,22 @@
+# Allow only runtime source and reference examples into the build context.
+*
+!Dockerfile
+!.dockerignore
+!control_plane/
+!control_plane/**
+!examples/
+!examples/**
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.env
+**/.env.*
+**/.ssh/
+**/*.pem
+**/*.key
+**/id_rsa*
+**/id_ed25519*
+**/*.sqlite3
+**/*.db
+examples/**/.runtime/
+examples/**/data/
