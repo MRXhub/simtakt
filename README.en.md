@@ -155,8 +155,6 @@ node tests/browser_workbench_smoke.cjs
 
 The script launches an isolated project and browser. It covers model import, template saves and failure retries, study creation, parameter checks, execution through qualification, persistence after reload, template version isolation, language switching and mobile navigation. Set `PYTHON` to select a Python executable or `BROWSER_CHANNEL` to select an installed browser channel. Reports, screenshots and request records are retained in `tmp/browser-smoke-*` and are excluded from source control.
 
-Local checks before this publication: **441 Python tests, 0 failures, 1 skip; 21 real-browser checks passed**. See the [publication review](docs/PUSH_REVIEW.md) and [browser validation record](docs/BROWSER_FLOW_REVIEW.md) for scope. These checks do not replace integration testing for your solver and deployment environment.
-
 ## Documentation and examples
 
 | Guide | Contents |

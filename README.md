@@ -155,8 +155,6 @@ node tests/browser_workbench_smoke.cjs
 
 脚本启动隔离的测试项目和浏览器，覆盖模型导入、模板保存及失败重试、研究创建、参数检查、运行至结果判定、刷新后持久化、模板版本隔离、中英文切换和移动端导航。可用环境变量 `PYTHON` 指定 Python 可执行文件、`BROWSER_CHANNEL` 指定已安装的浏览器通道。报告、截图和请求记录保存在 `tmp/browser-smoke-*`，不随源码提交。
 
-本次发布前的本地验证：**441 项 Python 测试，0 失败、1 跳过；21 项真实浏览器检查通过**。详细范围见[发布审查](docs/PUSH_REVIEW.md)与[浏览器验证记录](docs/BROWSER_FLOW_REVIEW.md)。这些结果不替代具体求解器和部署环境的集成验证。
-
 ## 文档与示例
 
 | 入口 | 内容 |
