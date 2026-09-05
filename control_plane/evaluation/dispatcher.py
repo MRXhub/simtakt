@@ -131,6 +131,11 @@ class SessionLifecycleDispatcher:
                     termination_result = {"attempt_id": attempt_id, "session_ref": session_ref, "termination": "unavailable"}
                 else:
                     try:
+                        resume = getattr(self.worker, "resume_session", None)
+                        if callable(resume):
+                            if pending.get("execution_plan") is None or pending.get("allocation") is None:
+                                raise DispatchError("pending termination lacks worker reconstruction data")
+                            resume(pending["execution_plan"], pending["allocation"], session_ref)
                         raw_outcome = fn(session_ref)
                     except Exception as exc:
                         termination_result = {"attempt_id": attempt_id, "session_ref": session_ref, "termination": "requested", "error": {"kind": "adapter_exception", "type": type(exc).__name__, "message": str(exc)}}

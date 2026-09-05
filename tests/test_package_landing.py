@@ -110,7 +110,8 @@ class PackageLandingDirectUnitTests(unittest.TestCase):
             self.assertIsNone(job["error"])
             self.assertIsNotNone(job["package"])
             self.assertEqual(job["package"]["artifact_id"], "pkg.pkg-test-success")
-            self.assertEqual(job["package"]["revision"], content_hash)
+            manifest_path = self.project_root / job["package"]["path"] / "manifest.json"
+            self.assertEqual(job["package"]["revision"], "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest())
 
             # Check log tail step-by-step
             logs = " ".join(job["log_tail"])

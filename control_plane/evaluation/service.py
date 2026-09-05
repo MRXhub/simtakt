@@ -192,12 +192,10 @@ class EvaluationMiddleware:
                             continue
                         pkg_name = m.get("package_name", entry.name)
                         art_id = m.get("artifact_id", f"pkg:{pkg_name}")
+                        if art_id in packages:
+                            continue
                         deck_file = m.get("deck_file", "deck.in")
-                        deck_path = resolved_entry / deck_file
-                        if deck_path.is_file():
-                            rev = "sha256:" + hashlib.sha256(deck_path.read_bytes()).hexdigest().lower()
-                        else:
-                            rev = "sha256:" + hashlib.sha256(manifest_file.read_bytes()).hexdigest().lower()
+                        rev = "sha256:" + hashlib.sha256(manifest_file.read_bytes()).hexdigest().lower()
                         pkg_item = {
                             "package_name": pkg_name,
                             "artifact_id": art_id,
@@ -215,6 +213,15 @@ class EvaluationMiddleware:
             except OSError:
                 pass
 
+        for package in packages.values():
+            package["deck_file_content"] = None
+            try:
+                package_dir = (root / package["path"]).resolve()
+                deck_path = (package_dir / package["deck_file"]).resolve()
+                deck_path.relative_to(package_dir)
+                package["deck_file_content"] = deck_path.read_text(encoding="utf-8-sig")
+            except (OSError, ValueError, TypeError, RuntimeError):
+                pass
         return list(packages.values())
 
     def list_problems(self) -> list[dict[str, Any]]:

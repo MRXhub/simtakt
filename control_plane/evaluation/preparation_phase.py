@@ -21,6 +21,9 @@ from control_plane.simulation.adapter_catalog import (
     simulation_definition_identity,
 )
 
+_LOG = logging.getLogger(__name__)
+
+
 class PreparationPhase:
     """Prepare at most ``queued`` versus available capacity plus lookahead."""
 

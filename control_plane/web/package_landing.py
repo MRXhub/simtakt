@@ -19,7 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from control_plane.core.evaluation_contracts import ContractError
+from control_plane.core.evaluation_contracts import ContractError, canonical_json
+from control_plane.core.workspace_artifacts import resolve_workspace_artifact
 
 PACKAGE_NAME_REGEX = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
 SAFE_LEAF_NAME_REGEX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
@@ -120,6 +121,13 @@ class PackageJob:
             "package": self.package,
             "error": self.error,
         }
+
+
+def _submission_hash(deck_file: str, files: list[dict[str, Any]], dependencies: list[str]) -> str:
+    """Hash all submitted bytes and their roles, independently of registration time."""
+    body = {"deck_file": deck_file, "files": sorted(files, key=lambda row: row["name"]),
+            "dependencies": dependencies}
+    return "sha256:" + hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
 
 
 def validate_package_staging_dir(staging_dir: Path) -> tuple[bool, str | None]:
@@ -318,10 +326,24 @@ class PackageLandingService:
             if not is_safe_leaf_name(dep):
                 raise ContractError(f"invalid or reserved dependency name '{dep}'")
 
+        names = [deck_filename, *extra_files]
+        folded = [name.casefold() for name in names]
+        if "manifest.json" in folded or len(folded) != len(set(folded)):
+            raise ContractError("deck, extra files, and manifest.json must have distinct names")
+        normalized_files = {
+            name: content if isinstance(content, bytes) else str(content).encode("utf-8")
+            for name, content in extra_files.items()
+        }
+        file_bytes = {deck_filename: deck_text.encode("utf-8"), **normalized_files}
+        file_records = [{"name": name, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+                        for name, raw in file_bytes.items()]
+        submission_hash = _submission_hash(deck_filename, file_records, list(dependencies))
         content_hash = "sha256:" + hashlib.sha256(deck_text.encode("utf-8")).hexdigest().lower()
-        idemp_key = (pkg_name, content_hash)
+        idemp_key = (pkg_name, submission_hash)
 
         with self._lock:
+            if self._closed:
+                raise ContractError("package landing service is closed")
             # 1. In-memory idempotency (check if existing non-failed job exists)
             existing_job_id = self._jobs_by_key.get(idemp_key)
             if existing_job_id and existing_job_id in self._jobs:
@@ -334,9 +356,9 @@ class PackageLandingService:
                     }
 
             # 2. Disk reverse-lookup idempotency (after server restart)
-            registered = self.find_registered_package(pkg_name, content_hash)
+            registered = self.find_registered_package(pkg_name, content_hash, submission_hash=submission_hash)
             if registered is not None:
-                job_id = f"job-pkg-reg-{registered['package_name']}-{content_hash[7:15]}"
+                job_id = f"job-pkg-reg-{registered['package_name']}-{submission_hash[7:15]}"
                 now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
                 job = PackageJob(
                     job_id=job_id,
@@ -344,11 +366,11 @@ class PackageLandingService:
                     content_hash=content_hash,
                     status="registered",
                     log_tail=[
-                        f"[{now_str}] [registered] Artifact recorded: {registered['artifact_id']} (revision: {content_hash}). Ready for Problem derivation."
+                        f"[{now_str}] [registered] Artifact recorded: {registered['artifact_id']} (revision: {registered['revision']}). Ready for Problem derivation."
                     ],
                     package={
                         "artifact_id": registered["artifact_id"],
-                        "revision": content_hash,
+                        "revision": registered["revision"],
                         "path": registered["path"],
                     },
                     created_at=datetime.now(timezone.utc).isoformat(),
@@ -373,7 +395,8 @@ class PackageLandingService:
                 log_tail=[
                     f"[{now_str}] [queued] Job {job_id} submitted. Target package: {pkg_name}"
                 ],
-                payload=dict(body),
+                payload={**body, "deck_file": deck_filename, "files": normalized_files,
+                         "dependencies": list(dependencies), "_submission_hash": submission_hash},
                 created_at=datetime.now(timezone.utc).isoformat(),
                 updated_at=datetime.now(timezone.utc).isoformat(),
             )
@@ -395,41 +418,43 @@ class PackageLandingService:
         return None
 
     def find_registered_package(
-        self, package_name: str, content_hash: str
+        self, package_name: str, content_hash: str, *, submission_hash: str | None = None
     ) -> dict[str, Any] | None:
-        """Check data/inputs/packages/<package_name> to see if it matches deck content hash."""
+        """Resolve an intact registered revision, including noninitial versions."""
         if not is_safe_package_name(package_name):
-            raise ContractError(
-                f"invalid or reserved package_name '{package_name}'"
-            )
-        norm_hash = content_hash.strip().lower()
-        pkg_dir = self.packages_dir / package_name
-        if not pkg_dir.is_dir() or pkg_dir.name.startswith(".staging"):
-            return None
-        manifest_file = pkg_dir / "manifest.json"
-        if not manifest_file.is_file():
-            return None
+            raise ContractError(f"invalid or reserved package_name '{package_name}'")
+        artifact_id = f"pkg.{package_name}"
+        shard_path = self.project_root / "records" / "artifacts" / f"{artifact_id}.json"
         try:
-            manifest = json.loads(manifest_file.read_bytes().decode("utf-8"))
-            deck_file = manifest.get("deck_file", "deck.in")
-            deck_path = pkg_dir / deck_file
-            if deck_path.is_file():
-                deck_bytes = deck_path.read_bytes()
-                computed = (
-                    "sha256:" + hashlib.sha256(deck_bytes).hexdigest().lower()
+            shard = json.loads(shard_path.read_text(encoding="utf-8"))
+            revisions = shard["artifact"]["revisions"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        for revision in revisions:
+            try:
+                resolved = resolve_workspace_artifact(
+                    self.project_root, artifact_id, revision=revision["revision"], expected_kind="input-package",
                 )
-                if computed == norm_hash:
-                    rel = self._rel_path(pkg_dir)
-                    return {
-                        "package_name": pkg_dir.name,
-                        "artifact_id": manifest.get(
-                            "artifact_id", f"pkg.{pkg_dir.name}"
-                        ),
-                        "path": rel,
-                        "manifest": manifest,
-                    }
-        except Exception:
-            pass
+                pkg_dir = resolved.path
+                pkg_dir.relative_to(self.packages_dir)
+                valid, _ = validate_package_staging_dir(pkg_dir)
+                if not valid:
+                    continue
+                manifest = json.loads((pkg_dir / "manifest.json").read_text(encoding="utf-8"))
+                if manifest.get("package_name") != package_name:
+                    continue
+                deck_file = manifest["deck_file"]
+                computed = "sha256:" + hashlib.sha256((pkg_dir / deck_file).read_bytes()).hexdigest()
+                if computed != content_hash.strip().lower():
+                    continue
+                if submission_hash is not None and _submission_hash(
+                    deck_file, manifest["files"], manifest.get("dependencies", []),
+                ) != submission_hash:
+                    continue
+                return {"package_name": package_name, "artifact_id": artifact_id,
+                        "revision": resolved.revision, "path": self._rel_path(pkg_dir), "manifest": manifest}
+            except Exception:
+                continue
         return None
 
     def find_registered_package_by_content_hash(
@@ -472,7 +497,7 @@ class PackageLandingService:
         raise TimeoutError(f"job {job_id} did not finish within {timeout}s")
 
     def _worker_loop(self) -> None:
-        while not self._closed:
+        while True:
             try:
                 job_id = self._queue.get(timeout=0.2)
             except queue.Empty:
@@ -605,7 +630,7 @@ class PackageLandingService:
             # 3. Registering Step. Existing revisions are retained in separate
             # immutable destination directories; never overwrite a package.
             if dest_dir.exists():
-                dest_dir = self.packages_dir / f"{job.package_name}__{job.content_hash[7:15]}"
+                dest_dir = self.packages_dir / f"{job.package_name}__{job.payload['_submission_hash'][7:]}"
             if dest_dir.exists():
                 raise PackageLandingError(
                     f"destination directory already exists: {self._rel_path(dest_dir)}"
@@ -626,6 +651,7 @@ class PackageLandingService:
             created_dest = True
 
             records_artifacts = self.project_root / "records" / "artifacts"
+            records_artifacts.mkdir(parents=True, exist_ok=True)
             if records_artifacts.is_dir():
                 manifest_path = dest_dir / "manifest.json"
                 manifest_hash = "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest().lower()
@@ -684,14 +710,14 @@ class PackageLandingService:
                 job.status = "registered"
                 job.package = {
                     "artifact_id": f"pkg.{job.package_name}",
-                    "revision": job.content_hash,
+                    "revision": manifest_hash,
                     "path": self._rel_path(dest_dir),
                 }
                 job.error = None
                 job.updated_at = datetime.now(timezone.utc).isoformat()
                 now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
                 job.log_tail.append(
-                    f"[{now_str}] [registered] Artifact recorded: pkg.{job.package_name} (revision: {job.content_hash[:16]}...). Ready for Problem derivation."
+                    f"[{now_str}] [registered] Artifact recorded: pkg.{job.package_name} (revision: {manifest_hash[:16]}...). Ready for Problem derivation."
                 )
 
         except Exception as exc:
