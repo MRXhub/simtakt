@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
@@ -11,6 +12,7 @@ from typing import Any, Protocol
 
 from control_plane.evaluation.service import EvaluationMiddleware
 from control_plane.evaluation.scheduling import schedule
+from control_plane.simulation.gateway import ReceiptIntegrityError
 from control_plane.simulation.worker import (
     SimulationWorker,
     normalize_session_observation,
@@ -36,10 +38,11 @@ def _parse_timestamp(value: Any) -> datetime | None:
     return None
 
 
+logger = logging.getLogger(__name__)
+_LOG = logger
+
 class DispatchError(RuntimeError):
     """Raised when scheduling or Worker lifecycle breaks the dispatch contract."""
-
-
 class ResourceMonitor(Protocol):
     """Supply fresh target facts and persist a decision receipt."""
 
@@ -101,6 +104,7 @@ class SessionLifecycleDispatcher:
         self.last_auto_released: list[dict[str, Any]] = []
         self.last_auto_requeued: list[dict[str, Any]] = []
         self.last_triage: list[dict[str, Any]] = []
+        self._orphan_cursor: tuple[str, str] | None = None
 
     def recover_once(self, *, now: datetime | None = None) -> dict[str, Any] | None:
         """Observe one reconciling session before applying wall-proof recovery."""
@@ -149,13 +153,13 @@ class SessionLifecycleDispatcher:
             attempt = self.middleware.lease_next_reconciliation(self.dispatcher_id, self.lease_seconds, now=now)
             polled = None if attempt is None else self.poll_once(attempt["attempt_id"], now=now)
 
-        # Observe first: an observed running session must not be wall-proofed
-        # as lost in this cycle.
+        # Only the candidate observed this round is eligible for wall proof.
+        # Other reconciling sessions may still be running or being collected.
         auto_release = getattr(self.middleware, "auto_release_wall_budget", None)
-        if callable(auto_release):
+        if callable(auto_release) and polled is not None:
             has_wall = getattr(self.middleware, "has_reconciling_attempts_for_wall_proof", None)
             if not callable(has_wall) or has_wall():
-                result = auto_release(now=now)
+                result = auto_release(now=now, attempt_ids=(polled["attempt_id"],))
                 if isinstance(result, list):
                     self.last_auto_released = result
         # Orphan session loop: bounded observe + kill_at / TTL recovery of open
@@ -207,6 +211,8 @@ class SessionLifecycleDispatcher:
         event_type: str,
         payload: Mapping[str, Any],
         now: datetime,
+        *,
+        log_error: bool = False,
     ) -> None:
         """Best-effort orphan state-event write; never aborts recovery."""
         recorder = getattr(self.middleware, "record_orphan_state_event", None)
@@ -221,9 +227,16 @@ class SessionLifecycleDispatcher:
                 payload=payload,
                 now=now,
             )
-        except Exception:
+        except Exception as exc:
+            if log_error:
+                logger.error(
+                    "Failed to record orphan event %s for %s: %s",
+                    event_type,
+                    orphan_id,
+                    exc,
+                    exc_info=True,
+                )
             return
-
     def _record_orphan_observe_failure(
         self, orphan: Mapping[str, Any], exc: Exception, now: datetime
     ) -> None:
@@ -251,8 +264,37 @@ class SessionLifecycleDispatcher:
         except Exception:
             return
 
+    def _record_orphan_collect_failure(
+        self, orphan: Mapping[str, Any], exc: Exception, now: datetime
+    ) -> None:
+        orphan_id = str(orphan.get("orphan_id") or "")
+        if not orphan_id:
+            return
+        try:
+            self._record_orphan_event(
+                orphan_id,
+                "open",
+                "open",
+                "OrphanCollectFailed",
+                {
+                    "orphan_id": orphan_id,
+                    "attempt_id": orphan.get("attempt_id"),
+                    "session_ref": orphan.get("session_ref"),
+                    "error": {
+                        "kind": "orphan-collect",
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                },
+                now,
+            )
+        except Exception:
+            return
+
     def _reconcile_open_orphans(self, *, now: datetime | None = None) -> int:
         """Observe and recover at most ``orphan_batch_size`` open orphans."""
+        if now is not None and getattr(now, "tzinfo", None) is None:
+            raise ValueError("recover_once requires a timezone-aware now")
         current = now or datetime.now().astimezone()
         list_open = getattr(self.middleware, "list_orphan_sessions", None)
         if not callable(list_open):
@@ -265,18 +307,48 @@ class SessionLifecycleDispatcher:
             ]
         except Exception:
             return 0
+        if not open_orphans:
+            self._orphan_cursor = None
+            return 0
+        open_orphans.sort(
+            key=lambda o: (str(o.get("created_at") or ""), str(o.get("orphan_id") or ""))
+        )
+        cursor = getattr(self, "_orphan_cursor", None)
+        if cursor is not None:
+            after_cursor = [
+                o
+                for o in open_orphans
+                if (str(o.get("created_at") or ""), str(o.get("orphan_id") or ""))
+                > cursor
+            ]
+            up_to_cursor = [
+                o
+                for o in open_orphans
+                if (str(o.get("created_at") or ""), str(o.get("orphan_id") or ""))
+                <= cursor
+            ]
+            rotated = after_cursor + up_to_cursor
+        else:
+            rotated = open_orphans
         processed = 0
-        for orphan in open_orphans[: self._orphan_batch_size()]:
+        batch = rotated[: self._orphan_batch_size()]
+        for orphan in batch:
+            self._orphan_cursor = (
+                str(orphan.get("created_at") or ""),
+                str(orphan.get("orphan_id") or ""),
+            )
             try:
                 if self._reconcile_one_orphan(orphan, current):
                     processed += 1
             except Exception as exc:
                 # A failing orphan is isolated: record the failure as an orphan
                 # state event and continue the bounded round with the next one.
+                logger.exception("Failed to reconcile orphan %s: %s", orphan.get("orphan_id"), exc)
                 self._record_orphan_observe_failure(orphan, exc, current)
         return processed
-
     def _reconcile_one_orphan(self, orphan: Mapping[str, Any], now: datetime) -> bool:
+        if getattr(now, "tzinfo", None) is None:
+            raise ValueError("recover_once requires a timezone-aware now")
         get_orphan = getattr(self.middleware, "get_orphan_session", None)
         update = getattr(self.middleware, "update_orphan_session", None)
         if not callable(get_orphan) or not callable(update):
@@ -306,13 +378,13 @@ class SessionLifecycleDispatcher:
             update(orphan_id, status="closed", metadata=meta, now=now)
             return True
         if observation in {"running", "unreachable", "indeterminate"}:
+            meta["last_observed_status"] = observation
+            meta["last_observed_at"] = _orphan_timestamp(now)
             if kill_at_elapsed or ttl_passed:
                 # Over-budget live session: terminate it.  The orphan stays open
                 # (still holding its license) until the termination is confirmed
                 # by a later round.
                 return self._terminate_orphan(latest, meta, now)
-            meta["last_observed_status"] = observation
-            meta["last_observed_at"] = _orphan_timestamp(now)
             update(orphan_id, status="open", metadata=meta, now=now)
             return True
         # unobservable -> leave the orphan open for a later round.
@@ -359,10 +431,16 @@ class SessionLifecycleDispatcher:
         try:
             result, artifact_id = collect(session_ref)
             harvest(result, self.dispatcher_id, artifact_id, session_ref, now=now)
-        except Exception:
-            # The orphan may already be closed by a committed harvest; never
-            # abort the bounded recovery round.
-            return True
+        except Exception as exc:
+            logger.error(
+                "Failed to collect orphan session %s (%s): %s",
+                orphan_id,
+                session_ref,
+                exc,
+                exc_info=True,
+            )
+            self._record_orphan_collect_failure(orphan, exc, now)
+            return False
         return True
 
     def _terminate_orphan(
@@ -377,26 +455,23 @@ class SessionLifecycleDispatcher:
         if not callable(update):
             return True
         if not callable(terminate):
-            # Termination is unavailable (no worker capability), so the
-            # over-budget orphan cannot be killed; close it as expired and
-            # record an orphan state event.
+            # No termination evidence: retain the orphan and its capacity.
             meta["terminate_status"] = "unavailable"
-            meta["closed_at"] = _orphan_timestamp(now)
+            update(orphan_id, status="open", metadata=meta, now=now)
             self._record_orphan_event(
                 orphan_id,
                 "open",
-                "closed",
+                "open",
                 "OrphanTerminationUnavailable",
                 {
                     "orphan_id": orphan_id,
                     "attempt_id": latest.get("attempt_id"),
                     "session_ref": session_ref,
                     "reason": "terminate-unavailable",
-                    "closed_at": meta["closed_at"],
                 },
                 now,
+                log_error=True,
             )
-            update(orphan_id, status="closed", metadata=meta, now=now)
             return True
         try:
             outcome = normalize_session_termination(terminate(session_ref))

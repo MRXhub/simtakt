@@ -1,9 +1,11 @@
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 EXAMPLE = Path(__file__).parents[1] / "examples" / "minimal-runtime"
@@ -40,6 +42,21 @@ class MinimalRuntimeExampleTests(unittest.TestCase):
             artifact_id, path = monitor.record_decision({"action": "wait"}, [], [], {"processors": 4})
             self.assertTrue(path.exists())
             self.assertEqual(json.loads(path.read_text())["artifact_id"], artifact_id)
+
+    @unittest.skipUnless(os.name == "nt", "Windows liveness probe")
+    def test_live_lock_owner_is_never_signalled(self):
+        with tempfile.TemporaryDirectory() as td:
+            monitor = FixedQuotaResourceMonitor({"config": {"runtime_dir": td}})
+            owner_pid = os.getpid() + 1000
+            monitor.lock_path.write_text(json.dumps({"pid": owner_pid, "created_at": _minimal_components.time.time()}))
+            listing = subprocess.CompletedProcess([], 0, f'"python.exe","{owner_pid}"'.encode(), b'')
+            with mock.patch.object(_minimal_components.os, "kill", side_effect=AssertionError("destructive probe")), \
+                 mock.patch.object(subprocess, "run", return_value=listing), \
+                 mock.patch.object(_minimal_components.time, "monotonic", side_effect=[0, 31]):
+                with self.assertRaisesRegex(RuntimeError, "live owner"):
+                    with monitor._lock():
+                        self.fail("stole a live owner's lock")
+            self.assertTrue(monitor.lock_path.exists())
 
     def test_atomic_lock_serializes_processes(self):
         with tempfile.TemporaryDirectory() as td:

@@ -180,7 +180,10 @@ samples before degrading back to the declared value:
   from the persisted budget's `kill_at_seconds` when present, else from
   `max_wall_seconds * kill_multiplier`, and passes it to
   `repository.auto_release_wall_budget`, which rechecks lifecycle state inside a
-  transaction before applying the lost transition
+  transaction before applying the lost transition. During dispatcher recovery,
+  only the candidate observed in that round is eligible; unobserved candidates
+  retain their allocation until their own observation round. Invalid persisted
+  deadlines are skipped without blocking valid candidates.
   (`service.py` around `auto_release_wall_budget`).
 
 ### Orphan sessions and the pending-kill loop
@@ -191,8 +194,8 @@ the control plane records an **orphan session** keyed to the live
 
 - **Deferred dispatch.**  Before claiming a prepared candidate, the dispatcher
   excludes any evaluation that carries an open orphan last observed `running`
-  with a `kill_at` still in the future, so it is not double-dispatched while
-  the real session is alive (`prepared_dispatcher._orphan_deferred_evaluation_ids`).
+  or `completed`, even after `kill_at`, so it is not double-dispatched while
+  the real session is alive or its result awaits harvest (`prepared_dispatcher._orphan_deferred_evaluation_ids`).
   Deferring only skips the round; it performs no Attempt transition.
 - **Bounded observation loop.**  `dispatcher.recover_once` runs the orphan loop
   (`_reconcile_open_orphans`) after wall-proof release, processing at most
@@ -203,9 +206,11 @@ the control plane records an **orphan session** keyed to the live
   collects it; `unreachable`/`indeterminate` leave it open for a later round
   (`dispatcher._reconcile_one_orphan`).
 - **TTL expiry.**  An orphan whose age from `orphan_since`/`created_at` exceeds
-  `orphan_ttl_seconds` (default `604800`) is closed as expired
-  (`dispatcher.py:190-258`).  When a worker lacks `terminate_session` the orphan
-  is left open with `terminate_status = 'unavailable'`.
+  `orphan_ttl_seconds` (default `604800`) triggers a termination request.
+  It closes only after an absent observation, confirmed termination, or harvest.
+  When a worker lacks `terminate_session`, the orphan is left open with
+  `terminate_status = 'unavailable'` and retains its license under the configured
+  orphan accounting policy.
 - **License accounting.**  Open orphan sessions are counted against license
   capacity: the atomic claim adds `COUNT(*) FROM orphan_sessions WHERE
   status='open'` to the active-allocation count before deciding whether

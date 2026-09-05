@@ -1331,6 +1331,25 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(self.repository.list_evaluations(origin="no-such-origin"), [])
 
+    def test_closed_orphan_ignores_stale_observer_updates(self) -> None:
+        attempt = self._make_lost_attempt(now=BASE_TIME)
+        orphan = self.repository.record_orphan_session(
+            attempt_id=attempt["attempt_id"], reason="observer-race", now=BASE_TIME,
+        )
+        closed = self.repository.update_orphan_session(
+            orphan["orphan_id"], status="closed", metadata={"terminate_status": "confirmed"},
+            now=BASE_TIME + timedelta(seconds=1),
+        )
+        for stale_status in ("open", "closed"):
+            with self.subTest(status=stale_status):
+                result = self.repository.update_orphan_session(
+                    orphan["orphan_id"], status=stale_status,
+                    metadata={"last_observed_status": "running"},
+                    now=BASE_TIME + timedelta(seconds=2),
+                )
+                self.assertEqual(result, closed)
+                self.assertEqual(self.repository.list_orphan_sessions("open"), [])
+
     def test_orphan_loop_recovers_open_orphans_by_kill_at(self) -> None:
         class FakeWorker:
             def __init__(self, observe: str = "running", terminate: str = "terminated"):
@@ -1346,7 +1365,7 @@ class RollingWindowRepositoryTests(unittest.TestCase):
                 return self.terminate
 
         # 1) running before kill_at -> not killed; kept open, last_observed running.
-        attempt = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+        attempt = self._make_lost_attempt(now=BASE_TIME)
         worker = FakeWorker(observe="running", terminate="terminated")
         self.repository.record_orphan_session(
             attempt_id=attempt["attempt_id"], reason="orphan-loop",
@@ -1371,9 +1390,7 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         self.assertIn("closed_at", closed[0]["metadata"])
 
         # 3) absent observation -> orphan closed without any termination.
-        second = self.lease(
-            self.prepare(self.submit(), window_limit=2), now=BASE_TIME
-        )
+        second = self._make_lost_attempt(now=BASE_TIME)
         absent_worker = FakeWorker(observe="absent", terminate="terminated")
         self.repository.record_orphan_session(
             attempt_id=second["attempt_id"], reason="orphan-absent",
@@ -1414,9 +1431,9 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             self.assertIn(version, versions)
         self.assertEqual(SCHEMA_VERSION, 18)
 
-    def _lost_orphan_attempt(self, submission, *, now=BASE_TIME):
-        """Lease an Attempt, reconcile it lost, and record an open orphan."""
-        a1 = self.prepare(submission, window_limit=2, now=now)
+    def _make_lost_attempt(self, submission=None, *, now=BASE_TIME, termination_state="confirmed"):
+        sub = self.submit() if submission is None else submission
+        a1 = self.prepare(sub, window_limit=2, now=now)
         a1 = self.lease(a1, now=now)
         self.repository.mark_attempt_reconciling(
             a1["attempt_id"], WORKER, ["artifact:reconciling"],
@@ -1426,8 +1443,20 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             a1["attempt_id"], WORKER, a1["allocation"]["session_ref"],
             "absent", 300, now=now,
         )
+        if termination_state is not None:
+            with closing(sqlite3.connect(self.database)) as connection:
+                connection.execute(
+                    "UPDATE attempts SET termination_state=? WHERE attempt_id=?",
+                    (termination_state, a1["attempt_id"]),
+                )
+                connection.commit()
         attempt = self.repository.get_attempt(a1["attempt_id"])
         self.assertEqual(attempt["status"], "lost")
+        return attempt
+
+    def _lost_orphan_attempt(self, submission, *, now=BASE_TIME):
+        """Lease an Attempt, reconcile it lost, and record an open orphan."""
+        attempt = self._make_lost_attempt(submission, now=now)
         orphan = self.repository.record_orphan_session(
             attempt_id=attempt["attempt_id"], reason="orphan-harvest",
             metadata={"orphan_since": now.isoformat()}, now=now,
@@ -1695,7 +1724,7 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         """Regression: a running orphan past its TTL is terminated, but it
         remains open (still holding a license) until a round confirms the
         termination."""
-        running = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+        running = self._make_lost_attempt(now=BASE_TIME)
         orphan = self.repository.record_orphan_session(
             attempt_id=running["attempt_id"], reason="orphan-ttl",
             metadata={
@@ -1741,11 +1770,9 @@ class RollingWindowRepositoryTests(unittest.TestCase):
         self.assertEqual(closed["metadata"]["terminate_status"], "confirmed")
         self.assertIn("closed_at", closed["metadata"])
 
-    def test_h1_terminate_unavailable_closes_expired_with_state_event(self) -> None:
-        """Regression: when no worker terminate capability exists, the
-        over-budget orphan is closed as unavailable/expired and an orphan state
-        event is recorded."""
-        running = self.lease(self.prepare(self.submit()), now=BASE_TIME)
+    def test_h1_terminate_unavailable_retains_orphan_with_state_event(self) -> None:
+        """An elapsed TTL is not evidence that the orphan stopped executing."""
+        running = self._make_lost_attempt(now=BASE_TIME)
         orphan = self.repository.record_orphan_session(
             attempt_id=running["attempt_id"], reason="orphan-ttl",
             metadata={
@@ -1769,10 +1796,17 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             middleware, _NoTerminateWorker()
         )
         dispatcher._reconcile_open_orphans(now=BASE_TIME)
-        closed = self.repository.get_orphan_session(orphan_id)
-        self.assertEqual(closed["status"], "closed")
-        self.assertEqual(closed["metadata"]["terminate_status"], "unavailable")
-        self.assertIn("closed_at", closed["metadata"])
+        still_open = self.repository.get_orphan_session(orphan_id)
+        self.assertEqual(still_open["status"], "open")
+        self.assertEqual(still_open["metadata"]["terminate_status"], "unavailable")
+        self.assertNotIn("closed_at", still_open["metadata"])
+        next_attempt = self.prepare(self.submit(), now=BASE_TIME)
+        with self.assertRaisesRegex(RepositoryError, "license sessions exhausted"):
+            self.lease(next_attempt, now=BASE_TIME, license_sessions=1)
+        dispatcher.worker.observe_session = mock.Mock(return_value="absent")
+        dispatcher._reconcile_open_orphans(now=BASE_TIME + timedelta(seconds=1))
+        self.assertEqual(self.repository.get_orphan_session(orphan_id)["status"], "closed")
+        self.lease(next_attempt, now=BASE_TIME + timedelta(seconds=1), license_sessions=1)
         events = self.repository.state_events(orphan_id)
         self.assertTrue(
             any(
@@ -1784,9 +1818,9 @@ class RollingWindowRepositoryTests(unittest.TestCase):
     # ---- M1: sibling release only on a real rowcount transition
 
     def test_m1_sibling_already_confirmed_is_not_written_attempt_lost(self) -> None:
-        """Regression: when the sibling is already settled (its termination is
-        confirmed), the late-harvest sibling release does not write AttemptLost
-        or mutate the sibling; an informational event records its state."""
+        """Regression: when the sibling is still active with confirmed termination,
+        it cannot be cleanly released: complete_orphan_attempt raises RepositoryError
+        and does not append a misleading AttemptSiblingAlreadySettled event."""
         submission = self.submit()
         attempt1, orphan1 = self._lost_orphan_attempt(submission)
         evaluation_id = orphan1["evaluation_id"]
@@ -1815,29 +1849,21 @@ class RollingWindowRepositoryTests(unittest.TestCase):
                 (second["attempt_id"],),
             )
             connection.commit()
-        outcome = self.repository.complete_orphan_attempt(
-            attempt1["attempt_id"], WORKER, ["evidence.late.harvest"],
-            now=BASE_TIME + timedelta(seconds=2),
-        )
-        self.assertEqual(outcome["harvest_status"], "harvested")
+        with self.assertRaises(RepositoryError):
+            self.repository.complete_orphan_attempt(
+                attempt1["attempt_id"], WORKER, ["evidence.late.harvest"],
+                now=BASE_TIME + timedelta(seconds=2),
+            )
         sibling = self.repository.get_attempt(second["attempt_id"])
-        # State left unchanged (no lost transition).
         self.assertEqual(sibling["status"], "running")
         self.assertEqual(sibling["termination_state"], "confirmed")
         events = self.repository.state_events(second["attempt_id"])
         self.assertFalse(
             any(event["event_type"] == "AttemptLost" for event in events)
         )
-        settled = [
-            event
-            for event in events
-            if event["event_type"] == "AttemptSiblingAlreadySettled"
-        ]
-        self.assertTrue(settled)
-        self.assertEqual(
-            settled[-1]["payload"].get("sibling_termination_state"), "confirmed"
+        self.assertFalse(
+            any(event["event_type"] == "AttemptSiblingAlreadySettled" for event in events)
         )
-
     # ---- M2: recover_once rejects a naive now
 
     def test_m2_recover_once_naive_now_raises_value_error(self) -> None:
@@ -1889,6 +1915,119 @@ class RollingWindowRepositoryTests(unittest.TestCase):
             second_now["metadata"]["last_observed_status"], "running"
         )
 
+    # ---- Regression tests: CAS and orphan handling fixes ----
+
+    def test_complete_orphan_attempt_second_harvest_is_idempotent(self) -> None:
+        """A second harvest after close returns idempotent receipt without mutating ledger."""
+        submission = self.submit()
+        attempt, orphan = self._lost_orphan_attempt(submission)
+        first_outcome = self.repository.complete_orphan_attempt(
+            attempt["attempt_id"], WORKER, ["evidence.harvest.late"],
+            now=BASE_TIME + timedelta(seconds=2),
+        )
+        self.assertEqual(first_outcome["harvest_status"], "harvested")
+        events_after_first = self.repository.state_events(attempt["attempt_id"])
+        completed_events_1 = [
+            e for e in events_after_first if e["event_type"] == "AttemptCompleted"
+        ]
+        self.assertEqual(len(completed_events_1), 1)
+
+        # Second harvest attempt:
+        second_outcome = self.repository.complete_orphan_attempt(
+            attempt["attempt_id"], WORKER, ["evidence.harvest.late"],
+            now=BASE_TIME + timedelta(seconds=3),
+        )
+        self.assertEqual(second_outcome["harvest_status"], "harvested")
+        closed = self.repository.get_orphan_session(orphan["orphan_id"])
+        self.assertEqual(closed["status"], "closed")
+        self.assertEqual(closed["harvest_status"], "harvested")
+
+        events_after_second = self.repository.state_events(attempt["attempt_id"])
+        completed_events_2 = [
+            e for e in events_after_second if e["event_type"] == "AttemptCompleted"
+        ]
+        self.assertEqual(len(completed_events_2), 1)
+        self.assertFalse(
+            any(e["event_type"] == "AttemptDiscardedDuplicate" for e in events_after_second)
+        )
+
+    def test_complete_orphan_attempt_active_sibling_with_confirmed_termination_raises_repository_error(
+        self,
+    ) -> None:
+        """An active sibling whose termination was confirmed cannot be released cleanly: raises RepositoryError without misleading event."""
+        submission = self.submit()
+        attempt1, orphan1 = self._lost_orphan_attempt(submission)
+        evaluation_id = orphan1["evaluation_id"]
+        middleware = EvaluationMiddleware(self.repository)
+        self.assertEqual(
+            middleware.auto_requeue_recovering(now=BASE_TIME + timedelta(seconds=1))[0]["status"],
+            "queued",
+        )
+        second = self.lease(
+            self.prepare(submission, window_limit=2, now=BASE_TIME + timedelta(seconds=1)),
+            now=BASE_TIME + timedelta(seconds=1),
+        )
+        self.repository.confirm_attempt_start(
+            second["attempt_id"], WORKER, now=BASE_TIME + timedelta(seconds=1)
+        )
+        self.assertEqual(
+            self.repository.get_attempt(second["attempt_id"])["status"], "running"
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE attempts SET termination_state='confirmed' WHERE attempt_id=?",
+                (second["attempt_id"],),
+            )
+            connection.commit()
+
+        with self.assertRaises(RepositoryError):
+            self.repository.complete_orphan_attempt(
+                attempt1["attempt_id"], WORKER, ["evidence.late.harvest"],
+                now=BASE_TIME + timedelta(seconds=2),
+            )
+        events = self.repository.state_events(second["attempt_id"])
+        self.assertFalse(
+            any(e["event_type"] == "AttemptSiblingAlreadySettled" for e in events)
+        )
+    def test_record_orphan_session_rejects_capacity_holding_attempt(self) -> None:
+        """Recording an orphan session for an attempt in capacity-holding status raises RepositoryError; lost attempt accepted."""
+        submission = self.submit()
+        prep = self.prepare(submission, window_limit=2, now=BASE_TIME)
+        leased = self.lease(prep, now=BASE_TIME)
+        self.repository.confirm_attempt_start(
+            leased["attempt_id"], WORKER, now=BASE_TIME
+        )
+        running = self.repository.get_attempt(leased["attempt_id"])
+        self.assertEqual(running["status"], "running")
+
+        # Running attempt -> rejected with RepositoryError
+        with self.assertRaises(RepositoryError):
+            self.repository.record_orphan_session(
+                attempt_id=running["attempt_id"],
+                reason="orphan-running-test",
+                now=BASE_TIME,
+            )
+
+        # Transition to lost (non-capacity-holding)
+        self.repository.mark_attempt_reconciling(
+            running["attempt_id"], WORKER, ["artifact:reconciling"],
+            reason="fixture-reconciliation", now=BASE_TIME,
+        )
+        self.repository.reconcile_attempt(
+            running["attempt_id"], WORKER, running["session_ref"],
+            "absent", 300, now=BASE_TIME,
+        )
+        lost = self.repository.get_attempt(running["attempt_id"])
+        self.assertEqual(lost["status"], "lost")
+
+        # Lost attempt -> accepted
+        orphan = self.repository.record_orphan_session(
+            attempt_id=lost["attempt_id"],
+            reason="orphan-lost-test",
+            now=BASE_TIME,
+        )
+        self.assertEqual(orphan["status"], "open")
+        self.assertEqual(orphan["attempt_id"], lost["attempt_id"])
 
 
 if __name__ == "__main__":

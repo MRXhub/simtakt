@@ -2855,6 +2855,22 @@ class SQLiteEvaluationRepository:
                         }
                     )
                     continue
+                # Validate both the release proof and the persisted orphan
+                # deadline before changing state. A corrupt duration must not
+                # abort this transaction or strand every other candidate.
+                try:
+                    claimed.astimezone(timezone.utc) + timedelta(seconds=proof_seconds)
+                    if isinstance(persisted_budget, Mapping) and "kill_at_seconds" in persisted_budget:
+                        claimed.astimezone(timezone.utc) + timedelta(seconds=persisted_budget["kill_at_seconds"])
+                except (OverflowError, TypeError):
+                    records.append({
+                        "attempt_id": attempt_id,
+                        "evaluation_id": str(row["evaluation_id"]),
+                        "status": "skipped",
+                        "reason": "budget-out-of-range",
+                        "source": "auto:wall-proof",
+                    })
+                    continue
                 if age <= proof_seconds:
                     # A live proof window is intentionally absent from the
                     # processing receipt: no lifecycle action occurred.
@@ -5254,13 +5270,17 @@ class SQLiteEvaluationRepository:
         encoded_meta = canonical_json(dict(metadata or {}))
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT attempt_id,evaluation_id,session_ref FROM attempts WHERE attempt_id=?",
+                "SELECT attempt_id,evaluation_id,session_ref,status FROM attempts WHERE attempt_id=?",
                 (attempt_id,),
             ).fetchone()
             if row is None:
                 raise RepositoryError(f"unknown Attempt: {attempt_id}")
             if not row["session_ref"]:
                 raise RepositoryError("orphan session requires session_ref")
+            if str(row["status"]) in CAPACITY_HOLDING_ATTEMPT_STATES:
+                raise RepositoryError(
+                    f"cannot record orphan session for attempt {attempt_id} in capacity-holding status: {row['status']}"
+                )
             orphan_id = str(uuid.uuid4())
             connection.execute(
                 """INSERT INTO orphan_sessions
@@ -5318,6 +5338,10 @@ class SQLiteEvaluationRepository:
             ).fetchone()
             if row is None:
                 raise RepositoryError(f"unknown orphan session: {orphan_id}")
+            # A delayed observer must not reopen a harvested/terminated orphan
+            # or overwrite the evidence that closed it.
+            if row["status"] == "closed":
+                return self._orphan_record(row)
             payload = row["metadata_json"] if metadata is None else canonical_json(dict(metadata))
             connection.execute(
                 "UPDATE orphan_sessions SET status=?,metadata_json=?,updated_at=? WHERE orphan_id=?",
@@ -5410,12 +5434,28 @@ class SQLiteEvaluationRepository:
             if not attempt_row["session_ref"]:
                 raise RepositoryError("orphan harvest requires a bound session")
             orphan_row = connection.execute(
-                "SELECT * FROM orphan_sessions WHERE attempt_id = ?", (attempt_id,)
+                "SELECT * FROM orphan_sessions WHERE attempt_id = ? AND status = 'open'",
+                (attempt_id,),
             ).fetchone()
             if orphan_row is None:
-                raise RepositoryError(
-                    "orphan harvest requires a recorded orphan session"
-                )
+                prior = connection.execute(
+                    "SELECT * FROM orphan_sessions WHERE attempt_id = ?", (attempt_id,)
+                ).fetchone()
+                if prior is None:
+                    raise RepositoryError(
+                        "orphan harvest requires a recorded orphan session"
+                    )
+                prior_orphan = self._orphan_record(prior)
+                return {
+                    "attempt_id": attempt_id,
+                    "orphan_id": prior_orphan["orphan_id"],
+                    "harvest_status": prior_orphan["harvest_status"],
+                    "attempt": self.get_attempt(attempt_id, connection=connection),
+                    "orphan": prior_orphan,
+                    "evaluation": self.get_evaluation(
+                        prior_orphan["evaluation_id"], connection=connection
+                    ),
+                }
             orphan_id = str(orphan_row["orphan_id"])
             evaluation_id = str(attempt_row["evaluation_id"])
             evaluation = connection.execute(
@@ -5476,11 +5516,28 @@ class SQLiteEvaluationRepository:
                     )
                 meta["harvest_status"] = "harvested"
                 meta["artifact_ids"] = artifacts
-                connection.execute(
+                closing_update = connection.execute(
                     "UPDATE orphan_sessions SET status='closed', harvest_status='harvested', "
-                    "metadata_json=?, updated_at=? WHERE orphan_id=?",
+                    "metadata_json=?, updated_at=? WHERE orphan_id=? AND status='open' AND harvest_status IS NULL",
                     (canonical_json(meta), timestamp, orphan_id),
                 )
+                if closing_update.rowcount == 0:
+                    prior = connection.execute(
+                        "SELECT * FROM orphan_sessions WHERE orphan_id = ?", (orphan_id,)
+                    ).fetchone()
+                    if prior is None or str(prior["status"]) != "closed":
+                        raise RepositoryError("failed to settle orphan session")
+                    prior_orphan = self._orphan_record(prior)
+                    return {
+                        "attempt_id": attempt_id,
+                        "orphan_id": orphan_id,
+                        "harvest_status": prior_orphan["harvest_status"],
+                        "attempt": self.get_attempt(attempt_id, connection=connection),
+                        "orphan": prior_orphan,
+                        "evaluation": self.get_evaluation(
+                            evaluation_id, connection=connection
+                        ),
+                    }
                 # The late harvest just won the qualification race, so this
                 # Evaluation is resolved by the harvested Attempt.  Any sibling
                 # Attempt still running or reconciling is now a duplicate whose
@@ -5508,9 +5565,10 @@ class SQLiteEvaluationRepository:
                             lease_owner = NULL, lease_expires_at = NULL,
                             updated_at = ?
                         WHERE attempt_id = ?
+                          AND status = ?
                           AND COALESCE(termination_state, '') IN ('', 'requested')
                         """,
-                        (timestamp, dup_id),
+                        (timestamp, dup_id, dup_from),
                     )
                     if updated.rowcount == 1:
                         self._state_event(
@@ -5529,24 +5587,33 @@ class SQLiteEvaluationRepository:
                             created_at=timestamp,
                         )
                     else:
-                        # The sibling was already settled (e.g. its termination
-                        # was confirmed elsewhere); do not overwrite it or claim
-                        # a new lost transition.  Record an informational event
-                        # carrying the sibling's current termination state.
+                        reread = connection.execute(
+                            "SELECT * FROM attempts WHERE attempt_id = ?",
+                            (dup_id,),
+                        ).fetchone()
+                        if reread is None:
+                            raise RepositoryError(f"unknown Attempt: {dup_id}")
+                        reread_status = str(reread["status"])
+                        if reread_status in ACTIVE_ATTEMPT_STATES:
+                            raise RepositoryError(
+                                f"active sibling attempt {dup_id} in status '{reread_status}' "
+                                f"with termination_state '{reread['termination_state']}' could not be released"
+                            )
+                        # The sibling was already settled (status is terminal).
                         self._state_event(
                             connection,
                             aggregate_type="attempt",
                             aggregate_id=dup_id,
-                            from_status=dup_from,
-                            to_status=dup_from,
+                            from_status=reread_status,
+                            to_status=reread_status,
                             event_type="AttemptSiblingAlreadySettled",
                             payload={
                                 "reason": "late-harvest-winner-sibling-settled",
                                 "source": "late-harvest",
                                 "superseded_by_attempt_id": attempt_id,
                                 "sibling_termination_state": (
-                                    None if dup_termination_state is None
-                                    else str(dup_termination_state)
+                                    None if reread["termination_state"] is None
+                                    else str(reread["termination_state"])
                                 ),
                                 "worker_id": str(worker_id),
                             },
@@ -5555,6 +5622,30 @@ class SQLiteEvaluationRepository:
                 attempt = self.get_attempt(attempt_id, connection=connection)
                 harvest_status = "harvested"
             else:
+                meta["harvest_status"] = "discarded"
+                meta["artifact_ids"] = artifacts
+                closing_update = connection.execute(
+                    "UPDATE orphan_sessions SET status='closed', harvest_status='discarded', "
+                    "metadata_json=?, updated_at=? WHERE orphan_id=? AND status='open' AND harvest_status IS NULL",
+                    (canonical_json(meta), timestamp, orphan_id),
+                )
+                if closing_update.rowcount == 0:
+                    prior = connection.execute(
+                        "SELECT * FROM orphan_sessions WHERE orphan_id = ?", (orphan_id,)
+                    ).fetchone()
+                    if prior is None or str(prior["status"]) != "closed":
+                        raise RepositoryError("failed to settle orphan session")
+                    prior_orphan = self._orphan_record(prior)
+                    return {
+                        "attempt_id": attempt_id,
+                        "orphan_id": orphan_id,
+                        "harvest_status": prior_orphan["harvest_status"],
+                        "attempt": self.get_attempt(attempt_id, connection=connection),
+                        "orphan": prior_orphan,
+                        "evaluation": self.get_evaluation(
+                            evaluation_id, connection=connection
+                        ),
+                    }
                 self._state_event(
                     connection,
                     aggregate_type="attempt",
@@ -5570,13 +5661,6 @@ class SQLiteEvaluationRepository:
                         "worker_id": str(worker_id),
                     },
                     created_at=timestamp,
-                )
-                meta["harvest_status"] = "discarded"
-                meta["artifact_ids"] = artifacts
-                connection.execute(
-                    "UPDATE orphan_sessions SET status='closed', harvest_status='discarded', "
-                    "metadata_json=?, updated_at=? WHERE orphan_id=?",
-                    (canonical_json(meta), timestamp, orphan_id),
                 )
                 attempt = self.get_attempt(attempt_id, connection=connection)
                 harvest_status = "discarded"

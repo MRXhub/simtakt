@@ -450,6 +450,39 @@ class WallBudgetRepositoryIntegrationTests(unittest.TestCase):
             self.repository.get_attempt(attempt["attempt_id"])["status"], "lost"
         )
 
+    def test_invalid_persisted_deadline_does_not_block_other_candidates(self) -> None:
+        for invalid in (0, -1, 10**30):
+            with self.subTest(kill_at_seconds=invalid):
+                broken = self._prepare()
+                self._reconcile(broken)
+                self._set_wall_budget_json(broken["attempt_id"], {"kill_at_seconds": invalid})
+                valid = self._prepare()
+                self._reconcile(valid)
+                self._set_wall_budget_json(valid["attempt_id"], {"kill_at_seconds": 100})
+                results = EvaluationMiddleware(self.repository).auto_release_wall_budget(
+                    now=self.clock + timedelta(seconds=101),
+                )
+                by_id = {row["attempt_id"]: row for row in results}
+                self.assertEqual(by_id[broken["attempt_id"]]["status"], "skipped")
+                self.assertEqual(by_id[valid["attempt_id"]]["status"], "released")
+                self.assertEqual(self.repository.get_attempt(broken["attempt_id"])["status"], "reconciling")
+
+    def test_overflowing_orphan_deadline_does_not_rollback_valid_release(self) -> None:
+        broken = self._prepare()
+        self._reconcile(broken)
+        self._set_wall_budget_json(broken["attempt_id"], {"kill_at_seconds": 10**30})
+        valid = self._prepare()
+        self._reconcile(valid)
+        self._set_wall_budget_json(valid["attempt_id"], {"kill_at_seconds": 100})
+        results = self.repository.auto_release_wall_budget(
+            {broken["attempt_id"]: 100, valid["attempt_id"]: 100},
+            now=self.clock + timedelta(seconds=101),
+        )
+        by_id = {row["attempt_id"]: row for row in results}
+        self.assertEqual(by_id[broken["attempt_id"]]["reason"], "budget-out-of-range")
+        self.assertEqual(by_id[valid["attempt_id"]]["status"], "released")
+        self.assertEqual(self.repository.get_attempt(broken["attempt_id"])["status"], "reconciling")
+
     def test_legacy_row_without_wall_budget_json_falls_back_to_1_7x_max_wall(self) -> None:
         attempt = self._prepare()
         self._reconcile(attempt)

@@ -43,6 +43,7 @@ from control_plane.evaluation.service import EvaluationMiddleware
 from tests.legacy_prebound_middleware_fixture import (
     LegacyEvaluationMiddleware,
 )
+from control_plane.simulation.gateway import ReceiptIntegrityError
 from control_plane.simulation.session_contracts import make_simulation_session_plan
 from control_plane.simulation.worker import SessionStartFailure
 from tests.test_scheduling_policy import write_project
@@ -317,7 +318,7 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
         return preparation, option, plan, allocation
     def claim_starting(
         self, prepared: dict, *, owner: str = "dispatcher:fixture",
-        session_ref: str = "session-fixture",
+        session_ref: str = "session-fixture", license_sessions: int = 1,
     ) -> dict:
         preparation, option, plan, allocation = self.claim_materials(
             prepared, session_ref=session_ref
@@ -327,7 +328,7 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
             preparation_id=preparation["preparation_id"],
             selected_option_id=option["option_id"],
             session_plan=plan, allocation=allocation,
-            license_sessions=1,
+            license_sessions=license_sessions,
             now=datetime.now(timezone.utc),
         )
         self.assertIsNotNone(claimed)
@@ -423,6 +424,38 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM attempts").fetchone()[0], 1)
         worker.resume_session.assert_called_once()
         worker.observe_session.assert_called_once_with("session-recovery")
+
+    def test_recover_does_not_wall_proof_unobserved_candidates(self) -> None:
+        first, dispatcher = self._make_reconciling_attempt()
+        second = self.prepare_other_candidate(target_id=TARGET, parameter_x=2.0)
+        self.claim_starting(second, owner="dispatcher:global", session_ref="session-second", license_sessions=2)
+        self.middleware.confirm_attempt_start(second["attempt_id"], "dispatcher:global")
+        self.middleware.require_reconciliation(
+            second["attempt_id"], "dispatcher:global", reason="fixture-recovery",
+        )
+        dispatcher.worker.resume_session = mock.Mock()
+        dispatcher.worker.observe_session = mock.Mock(return_value="running")
+        now = datetime.now(timezone.utc) + timedelta(seconds=3000)
+
+        dispatcher.recover_once(now=now)
+
+        self.assertEqual(self.middleware.get_attempt(first["attempt_id"])["status"], "running")
+        self.assertEqual(self.middleware.get_attempt(second["attempt_id"])["status"], "reconciling")
+        self.assertEqual(self.middleware.list_orphan_sessions("open"), [])
+        dispatcher.worker.observe_session.assert_called_once_with("session-recovery")
+        dispatcher.recover_once(now=now + timedelta(seconds=1))
+        self.assertEqual(self.middleware.get_attempt(second["attempt_id"])["status"], "running")
+
+    def test_recover_does_not_release_candidate_leased_by_another_observer(self) -> None:
+        prepared, dispatcher = self._make_reconciling_attempt()
+        now = datetime.now(timezone.utc) + timedelta(seconds=3000)
+        self.middleware.expire_leases(now=now)
+        self.middleware.lease_next_reconciliation("other-observer", 30, now=now)
+        dispatcher.worker.observe_session = mock.Mock()
+        dispatcher.recover_once(now=now)
+        self.assertEqual(self.middleware.get_attempt(prepared["attempt_id"])["status"], "reconciling")
+        dispatcher.worker.observe_session.assert_not_called()
+        self.assertEqual(dispatcher.last_auto_released, [])
 
     def test_recover_absent_marks_lost_and_requeues_after_wall_proof(self) -> None:
         prepared, dispatcher = self._make_reconciling_attempt()
@@ -909,6 +942,14 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
         mw.confirm_attempt_start(first["attempt_id"], "dispatcher:fixture")
         # The controller lost track but the session still runs elsewhere: record
         # an open orphan and mark it observed running, with kill_at far ahead.
+        mw.require_reconciliation(
+            first["attempt_id"], "dispatcher:fixture",
+            reason="lost-controller", now=now,
+        )
+        mw.reconcile_attempt(
+            first["attempt_id"], "dispatcher:fixture", "session-defer",
+            "absent", 300, now=now,
+        )
         repo.record_orphan_session(
             attempt_id=first["attempt_id"], reason="lost-controller",
             metadata={"kill_at": (now + timedelta(seconds=3600)).isoformat()},
@@ -921,7 +962,6 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
             now=now,
         )
         # Free the evaluation so a fresh (second) attempt can be prepared.
-        mw.fail_attempt(first["attempt_id"], "dispatcher:fixture", "solver-crash")
         mw.plan_recovery(self.evaluation["evaluation_id"], "retry after orphan")
         mw.auto_requeue_recovering(now=now)
         second = self.prepare()
@@ -935,6 +975,15 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
             second["evaluation_id"], dispatcher._orphan_deferred_evaluation_ids(now)
         )
         # While the running orphan is not yet killable, the evaluation is deferred.
+        self.assertEqual(dispatcher.dispatch_once(now=now), [])
+        self.assertIsNone(mw.get_attempt(second["attempt_id"])["allocation"])
+        # Passing the deadline is not proof of termination: a spare license
+        # must not allow the same evaluation to launch a duplicate session.
+        repo.update_orphan_session(
+            orphan["orphan_id"], status="open",
+            metadata={"last_observed_status": "running", "kill_at": (now - timedelta(seconds=1)).isoformat()},
+            now=now,
+        )
         self.assertEqual(dispatcher.dispatch_once(now=now), [])
         self.assertIsNone(mw.get_attempt(second["attempt_id"])["allocation"])
         # After the orphan closes, the same evaluation is claimed this round.
@@ -1362,7 +1411,188 @@ class PreparedExecutionDispatcherTests(unittest.TestCase):
         self.assertEqual(stored["status"], "planned")
         self.assertIsNotNone(stored["execution_plan"])
         self.assertIsNone(stored["allocation"])
+    def test_poll_once_observe_oserror_requires_reconciliation_and_preserves_exception(self) -> None:
+        prepared = self.prepare()
+        self.claim_starting(prepared, owner="dispatcher:global", session_ref="session-obs-oserror")
+        self.middleware.confirm_attempt_start(prepared["attempt_id"], "dispatcher:global")
+        worker = mock.Mock()
+        worker.observe_session.side_effect = OSError("observe disk error")
+        dispatcher = SessionLifecycleDispatcher(
+            self.middleware, mock.Mock(), worker,
+            dispatcher_id="dispatcher:global", lease_seconds=120,
+        )
+        with mock.patch.object(self.middleware, "require_reconciliation", wraps=self.middleware.require_reconciliation) as spy_rec:
+            with self.assertRaises(OSError) as ctx:
+                dispatcher.poll_once(prepared["attempt_id"])
+            self.assertEqual(str(ctx.exception), "observe disk error")
+            spy_rec.assert_called_once()
+            self.assertEqual(spy_rec.call_args.args[0], prepared["attempt_id"])
+            self.assertEqual(
+                spy_rec.call_args.kwargs.get("reason") or spy_rec.call_args.args[2],
+                "worker-observation-indeterminate",
+            )
+        stored = self.middleware.get_attempt(prepared["attempt_id"])
+        self.assertEqual(stored["status"], "reconciling")
 
+    def test_poll_once_observe_receipt_integrity_error_fails_attempt_without_reconciliation(self) -> None:
+        prepared = self.prepare()
+        self.claim_starting(prepared, owner="dispatcher:global", session_ref="session-obs-receipt")
+        self.middleware.confirm_attempt_start(prepared["attempt_id"], "dispatcher:global")
+        worker = mock.Mock()
+        worker.observe_session.side_effect = ReceiptIntegrityError("bad observe receipt")
+        dispatcher = SessionLifecycleDispatcher(
+            self.middleware, mock.Mock(), worker,
+            dispatcher_id="dispatcher:global", lease_seconds=120,
+        )
+        with mock.patch.object(self.middleware, "require_reconciliation", wraps=self.middleware.require_reconciliation) as spy_rec:
+            failed = dispatcher.poll_once(prepared["attempt_id"])
+            spy_rec.assert_not_called()
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["failure_class"], "runner-receipt-integrity-mismatch")
+        stored = self.middleware.get_attempt(prepared["attempt_id"])
+        self.assertEqual(stored["status"], "failed")
+        self.assertEqual(stored["failure_class"], "runner-receipt-integrity-mismatch")
 
+    def test_poll_once_collect_oserror_requires_reconciliation_and_preserves_exception(self) -> None:
+        prepared = self.prepare()
+        self.claim_starting(prepared, owner="dispatcher:global", session_ref="session-coll-oserror")
+        self.middleware.confirm_attempt_start(prepared["attempt_id"], "dispatcher:global")
+        worker = mock.Mock()
+        worker.observe_session.return_value = "completed"
+        worker.collect_session.side_effect = OSError("collect disk error")
+        dispatcher = SessionLifecycleDispatcher(
+            self.middleware, mock.Mock(), worker,
+            dispatcher_id="dispatcher:global", lease_seconds=120,
+        )
+        with mock.patch.object(self.middleware, "require_reconciliation", wraps=self.middleware.require_reconciliation) as spy_rec:
+            with self.assertRaises(OSError) as ctx:
+                dispatcher.poll_once(prepared["attempt_id"])
+            self.assertEqual(str(ctx.exception), "collect disk error")
+            spy_rec.assert_called_once()
+            self.assertEqual(spy_rec.call_args.args[0], prepared["attempt_id"])
+            self.assertEqual(
+                spy_rec.call_args.kwargs.get("reason") or spy_rec.call_args.args[2],
+                "worker-collection-indeterminate",
+            )
+        stored = self.middleware.get_attempt(prepared["attempt_id"])
+        self.assertEqual(stored["status"], "reconciling")
+
+    def test_poll_once_collect_receipt_integrity_error_fails_attempt_without_reconciliation(self) -> None:
+        prepared = self.prepare()
+        self.claim_starting(prepared, owner="dispatcher:global", session_ref="session-coll-receipt")
+        self.middleware.confirm_attempt_start(prepared["attempt_id"], "dispatcher:global")
+        worker = mock.Mock()
+        worker.observe_session.return_value = "completed"
+        worker.collect_session.side_effect = ReceiptIntegrityError("bad collect receipt")
+        dispatcher = SessionLifecycleDispatcher(
+            self.middleware, mock.Mock(), worker,
+            dispatcher_id="dispatcher:global", lease_seconds=120,
+        )
+        with mock.patch.object(self.middleware, "require_reconciliation", wraps=self.middleware.require_reconciliation) as spy_rec:
+            failed = dispatcher.poll_once(prepared["attempt_id"])
+            spy_rec.assert_not_called()
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["failure_class"], "runner-receipt-integrity-mismatch")
+        stored = self.middleware.get_attempt(prepared["attempt_id"])
+        self.assertEqual(stored["status"], "failed")
+        self.assertEqual(stored["failure_class"], "runner-receipt-integrity-mismatch")
+
+    def test_eleven_persistently_open_orphans_batch_size_ten_inspects_eleventh(self) -> None:
+        now = datetime.now(timezone.utc)
+        orphans = []
+        for i in range(11):
+            cand = self.prepare_other_candidate(target_id=TARGET, parameter_x=float(200 + i))
+            preparation, option, plan, allocation = self.claim_materials(
+                cand, session_ref=f"session-rot-{i:02d}"
+            )
+            self.middleware.claim_prepared_execution(
+                cand["attempt_id"], "dispatcher:fixture", 120,
+                preparation_id=preparation["preparation_id"],
+                selected_option_id=option["option_id"],
+                session_plan=plan, allocation=allocation,
+                license_sessions=100,
+                now=now + timedelta(seconds=i),
+            )
+            self.middleware.require_reconciliation(
+                cand["attempt_id"], "dispatcher:fixture",
+                reason="fixture-reconciliation",
+                now=now + timedelta(seconds=i),
+            )
+            self.middleware.reconcile_attempt(
+                cand["attempt_id"], "dispatcher:fixture",
+                f"session-rot-{i:02d}", "absent", 300,
+                now=now + timedelta(seconds=i),
+            )
+            orphan = self.middleware._repository.record_orphan_session(
+                attempt_id=cand["attempt_id"],
+                reason="test-rotation",
+                metadata={"kill_at": (now + timedelta(seconds=7200)).isoformat()},
+                now=now + timedelta(seconds=i),
+            )
+            orphans.append(orphan)
+
+        observed_session_refs = []
+
+        class _RunningWorker:
+            def resume_session(self, plan, allocation, session_ref):
+                pass
+            def observe_session(self, session_ref):
+                observed_session_refs.append(session_ref)
+                return "running"
+            def terminate_session(self, session_ref):
+                return "terminated"
+
+        worker = _RunningWorker()
+        dispatcher = SessionLifecycleDispatcher(
+            self.middleware, mock.Mock(), worker,
+            dispatcher_id="dispatcher:test-rotation", lease_seconds=30,
+        )
+        self.assertEqual(dispatcher._orphan_batch_size(), 10)
+
+        for round_num in range(3):
+            round_time = now + timedelta(seconds=100 + round_num)
+            processed = dispatcher._reconcile_open_orphans(now=round_time)
+            self.assertEqual(processed, 10)
+
+        self.assertIn("session-rot-10", observed_session_refs)
+    def test_running_orphan_defers_even_after_deadline_or_without_one(self) -> None:
+        now = datetime.now(timezone.utc)
+        dispatcher = self.dispatcher(FakeResourceMonitor())
+        for deadline in (None, "invalid", (now - timedelta(seconds=1)).isoformat()):
+            with self.subTest(kill_at=deadline):
+                dispatcher.middleware.list_orphan_sessions = mock.Mock(return_value=[{
+                    "orphan_id": "orphan-live", "evaluation_id": "eval-live", "status": "open",
+                    "metadata": {"last_observed_status": "running", "kill_at": deadline},
+                }])
+                self.assertIn("eval-live", dispatcher._orphan_deferred_evaluation_ids(now))
+
+    def test_completed_unharvested_open_orphan_defers_evaluation(self) -> None:
+        now = datetime.now(timezone.utc)
+        dispatcher = self.dispatcher(FakeResourceMonitor())
+        past_kill_at = (now - timedelta(seconds=100)).isoformat()
+        dispatcher.middleware.list_orphan_sessions = mock.Mock(
+            return_value=[
+                {
+                    "orphan_id": "orphan-1",
+                    "evaluation_id": "eval-completed",
+                    "status": "open",
+                    "metadata": {
+                        "last_observed_status": "completed",
+                        "kill_at": past_kill_at,
+                    },
+                },
+                {
+                    "orphan_id": "orphan-2",
+                    "evaluation_id": "eval-completed-no-kill",
+                    "status": "open",
+                    "metadata": {
+                        "last_observed_status": "completed",
+                    },
+                },
+            ]
+        )
+        deferred = dispatcher._orphan_deferred_evaluation_ids(now)
+        self.assertIn("eval-completed", deferred)
+        self.assertIn("eval-completed-no-kill", deferred)
 if __name__ == "__main__":
     unittest.main()

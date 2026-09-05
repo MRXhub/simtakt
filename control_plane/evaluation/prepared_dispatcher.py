@@ -425,8 +425,8 @@ class PreparedExecutionDispatcher(SessionLifecycleDispatcher):
         *,
         now: datetime,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        # An Evaluation whose session is orphaned but still observed running
-        # (and not yet past its kill_at) must not be claimed again this round.
+        # An Evaluation whose orphan is running or awaiting harvest must not
+        # be claimed again until that orphan closes.
         # Deferring only skips the round: no Attempt transition is performed.
         deferred = self._orphan_deferred_evaluation_ids(now)
         eligible_attempts: list[dict[str, Any]] = []
@@ -446,7 +446,7 @@ class PreparedExecutionDispatcher(SessionLifecycleDispatcher):
     def _orphan_deferred_evaluation_ids(
         self, now: datetime
     ) -> set[str]:
-        """Return evaluation ids carrying an open orphan still running and not killable.
+        """Return evaluation ids whose observed orphan still needs termination or harvest.
 
         Such evaluations keep a real session executing elsewhere, so starting a
         new Attempt for them would double-run the work.  The set is empty when
@@ -464,35 +464,15 @@ class PreparedExecutionDispatcher(SessionLifecycleDispatcher):
             if not isinstance(orphan, dict):
                 continue
             meta = orphan.get("metadata") or {}
-            if meta.get("last_observed_status") != "running":
+            eval_id = orphan.get("evaluation_id")
+            if not eval_id:
                 continue
-            kill_at = self._parse_orphan_timestamp(meta.get("kill_at"))
-            if kill_at is not None and now < kill_at:
-                deferred.add(orphan.get("evaluation_id"))
+            observed_status = meta.get("last_observed_status")
+            # Expiry only authorizes a termination request; it does not prove
+            # the running session stopped or the completed result was harvested.
+            if observed_status in {"running", "completed"}:
+                deferred.add(eval_id)
         return deferred
-
-    @staticmethod
-    def _parse_orphan_timestamp(value: Any) -> datetime | None:
-        if isinstance(value, datetime):
-            return value if value.tzinfo is not None else None
-        if isinstance(value, str):
-            try:
-                parsed = datetime.fromisoformat(value)
-            except ValueError:
-                return None
-            return parsed if parsed.tzinfo is not None else None
-        return None
-        eligible_attempts: list[dict[str, Any]] = []
-        candidates: list[dict[str, Any]] = []
-        for attempt in attempts:
-            try:
-                candidate = self._prepared_candidate(attempt, now=now)
-            except (ExecutionOptionError, ComputeProfileError, GovernedPreparationError, DispatchError) as exc:
-                self._retire_rejected_preparation(attempt, now=now, error=exc)
-                continue
-            eligible_attempts.append(attempt)
-            candidates.append(candidate)
-        return eligible_attempts, candidates
 
     @staticmethod
     def _profile_identities(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -55,7 +55,7 @@ class RuntimeLoop:
         while not self._stop and (max_rounds is None or rounds < max_rounds):
             rounds += 1
             progressed = False
-            phase_failed = [False, False, False]
+            phase_failed: dict[str, bool] = {}
             if self.preparer is not None:
                 preparer = self.preparer
             else:
@@ -65,33 +65,42 @@ class RuntimeLoop:
                 # look like one that succeeds every round.  Real dispatchers
                 # store configured collaborators in their instance mapping.
                 preparer = getattr(self.dispatcher, "__dict__", {}).get("preparer")
+            prepared = False
             if preparer is not None:
+                phase_failed["prepare"] = False
                 try:
-                    progressed = progressed or bool(preparer.prepare_once())
+                    prepared = bool(preparer.prepare_once())
                 except Exception as exc:
-                    phase_failed[0] = True
+                    phase_failed["prepare"] = True
                     self.errors.append(("prepare_once", exc))
                     _LOG.error("prepare_once failed: %s: %s", type(exc).__name__, exc)
+            recovered = False
+            phase_failed["recover"] = False
             try:
-                progressed = progressed or bool(self.dispatcher.recover_once())
+                recovered = bool(self.dispatcher.recover_once())
             except Exception as exc:
-                phase_failed[0] = True
+                phase_failed["recover"] = True
                 self.errors.append(("recover_once", exc))
                 _LOG.error("recover_once failed: %s: %s", type(exc).__name__, exc)
+            dispatched = False
+            phase_failed["dispatch"] = False
             try:
-                progressed = progressed or bool(self.dispatcher.dispatch_once())
+                dispatched = bool(self.dispatcher.dispatch_once())
             except Exception as exc:
-                phase_failed[1] = True
+                phase_failed["dispatch"] = True
                 self.errors.append(("dispatch_once", exc))
                 _LOG.error("dispatch_once failed: %s: %s", type(exc).__name__, exc)
+            progressed = prepared or recovered or dispatched
 
             # Re-enumerate every round.  Allocation records contain the
             # authoritative attempt_id (repository contract).
+            polled_progress = False
+            phase_failed["poll"] = False
             try:
                 middleware = getattr(self.dispatcher, "middleware", None)
                 enumerate_active = getattr(middleware, "list_active_allocations", None) or getattr(middleware, "active_allocations", None)
                 if not callable(enumerate_active):
-                    progressed = progressed or bool(self.dispatcher.poll_once())
+                    polled_progress = bool(self.dispatcher.poll_once())
                 else:
                     allocations = enumerate_active()
                     poll_attempts = 0
@@ -107,10 +116,11 @@ class RuntimeLoop:
                                 before = before_record.get("status") if isinstance(before_record, dict) else None
                             result = self.dispatcher.poll_once(attempt_id)
                             after = result.get("status") if isinstance(result, dict) else None
-                            progressed = progressed or (
+                            if (
                                 (before is not None and after is not None and before != after)
                                 or (before is None and bool(result))
-                            )
+                            ):
+                                polled_progress = True
                         except Exception as exc:
                             poll_failures += 1
                             self.errors.append((f"poll_once:{attempt_id}", exc))
@@ -119,12 +129,13 @@ class RuntimeLoop:
                                 attempt_id, type(exc).__name__, exc,
                             )
                     if poll_attempts and poll_failures == poll_attempts:
-                        phase_failed[2] = True
+                        phase_failed["poll"] = True
             except Exception as exc:
-                phase_failed[2] = True
+                phase_failed["poll"] = True
                 self.errors.append(("poll_once", exc))
                 _LOG.error("poll_once failed: %s: %s", type(exc).__name__, exc)
-            if all(phase_failed):
+            progressed = progressed or polled_progress
+            if phase_failed and all(phase_failed.values()):
                 failures += 1
             else:
                 failures = 0

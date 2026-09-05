@@ -5,9 +5,11 @@ CPU/memory, the site's scheduler (such as Slurm), and the approved license
 service. TODO(adapter): integrate authoritative site-specific APIs.
 """
 from __future__ import annotations
+import csv
 import hashlib
 import json
 import os
+import subprocess
 import time
 import uuid
 from contextlib import contextmanager
@@ -63,9 +65,23 @@ class FixedQuotaResourceMonitor:
                     stale = time.time() - created > 300
                     if not stale and pid > 0 and pid != os.getpid():
                         try:
-                            os.kill(pid, 0)
-                        except (OSError, ProcessLookupError):
+                            if os.name == "nt":
+                                # os.kill(pid, 0) sends a console signal on Windows.
+                                result = subprocess.run(
+                                    ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+                                    capture_output=True, timeout=5, check=False,
+                                )
+                                rows = csv.reader(result.stdout.decode("mbcs", errors="replace").splitlines())
+                                stale = result.returncode == 0 and not any(
+                                    len(row) >= 2 and row[1].strip() == str(pid) for row in rows
+                                )
+                            else:
+                                os.kill(pid, 0)
+                        except ProcessLookupError:
                             stale = True
+                        except (OSError, subprocess.TimeoutExpired):
+                            # An unavailable probe is not evidence of a dead owner.
+                            pass
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     stale = True
                 if stale:

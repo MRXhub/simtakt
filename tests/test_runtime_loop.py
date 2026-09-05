@@ -70,6 +70,23 @@ class LoopTests(unittest.TestCase):
         loop = RuntimeLoop(d, min_interval=0, sleep=lambda _: None, consecutive_failure_limit=2)
         self.assertEqual(loop.run(), 2)
 
+    def test_preparer_success_with_other_phase_failures_does_not_stop_loop(self):
+        d = self.dispatcher([{"attempt_id": "a"}])
+        d.recover_once.side_effect = RuntimeError("r")
+        d.dispatch_once.side_effect = RuntimeError("d")
+        d.poll_once.side_effect = RuntimeError("p")
+        preparer = Mock()
+        preparer.prepare_once.return_value = True
+        loop = RuntimeLoop(
+            d,
+            preparer=preparer,
+            min_interval=0,
+            sleep=lambda _: None,
+            consecutive_failure_limit=2,
+        )
+        rounds = loop.run(max_rounds=5)
+        self.assertEqual(rounds, 5)
+        self.assertEqual(preparer.prepare_once.call_count, 5)
     def test_backoff_progress_and_no_progress(self):
         d = self.dispatcher([])
         d.recover_once.side_effect = [True, False, False]
@@ -98,7 +115,13 @@ class LoopTests(unittest.TestCase):
         loop2._stop = True
         self.assertEqual(loop2.run(max_rounds=3), 0)
         d2.close.assert_not_called()
-
-
+    def test_recovery_truthy_does_not_skip_dispatch(self):
+        d = self.dispatcher([])
+        d.recover_once.return_value = {"termination": "requested"}
+        d.dispatch_once.return_value = False
+        loop = RuntimeLoop(d, min_interval=0, sleep=lambda _: None)
+        self.assertEqual(loop.run(max_rounds=3), 3)
+        self.assertEqual(d.recover_once.call_count, 3)
+        self.assertEqual(d.dispatch_once.call_count, 3)
 if __name__ == "__main__":
     unittest.main()

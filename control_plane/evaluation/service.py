@@ -628,10 +628,13 @@ class EvaluationMiddleware:
 
 
     def auto_release_wall_budget(
-        self, *, now: datetime | None = None
+        self, *, now: datetime | None = None, attempt_ids: Sequence[str] | None = None
     ) -> list[dict[str, Any]]:
         """Compute each Attempt's proof from its persisted immutable budget."""
         candidates = self._repository.list_reconciling_attempts_for_wall_proof()
+        if attempt_ids is not None:
+            eligible_ids = set(attempt_ids)
+            candidates = [row for row in candidates if row["attempt_id"] in eligible_ids]
         if not candidates:
             return []
         multiplier = 1.7
@@ -659,6 +662,7 @@ class EvaluationMiddleware:
                 isinstance(budget, Mapping)
                 and isinstance(budget.get("kill_at_seconds"), int)
                 and not isinstance(budget.get("kill_at_seconds"), bool)
+                and budget["kill_at_seconds"] > 0
             ):
                 proofs[candidate["attempt_id"]] = int(budget["kill_at_seconds"])
                 continue
