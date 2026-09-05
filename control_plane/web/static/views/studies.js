@@ -10,8 +10,9 @@
  */
 
 import { t, fmtRelativeTime, fmtDate } from "../i18n.js";
+import { entityName } from "../display.js";
 import { state } from "../state.js";
-import { el, txt, pageHead, emptyPanel, errorBlock, chip, statusPill, tip, monoHash } from "../ui.js";
+import { el, txt, pageHead, emptyPanel, errorBlock, chip, statusPill, tip, monoHash, statusName, technicalDetails } from "../ui.js";
 import { fetchJSON } from "../api.js";
 import { navigate } from "../router.js";
 
@@ -77,7 +78,7 @@ export async function renderStudiesView({ id, isEmbedded = false } = {}) {
     const aId = el("a", "mono mono-study-id", {
       href: `#/study/${encodeURIComponent(sid)}`,
       style: "font-weight: 600;"
-    }, txt(sid));
+    }, txt(entityName(sid, "study")));
     tdId.appendChild(aId);
     tr.appendChild(tdId);
 
@@ -85,14 +86,14 @@ export async function renderStudiesView({ id, isEmbedded = false } = {}) {
     if (pid !== "—") {
       tdProb.appendChild(el("a", "mono mono-problem-id", {
         href: `#/problem/${encodeURIComponent(pid)}`
-      }, txt(pid)));
+      }, txt(entityName(pid, "problem"))));
     } else {
       tdProb.appendChild(el("span", "dim", "—"));
     }
     tr.appendChild(tdProb);
 
     tr.appendChild(el("td", "mono sub", monoHash(rev, { len: 12 })));
-    tr.appendChild(el("td", "", chip("info", auto)));
+    tr.appendChild(el("td", "", chip("info", t("profile_" + auto))));
 
     const tdAct = el("td", "num");
     const actGroup = el("div", { style: "display: inline-flex; gap: 5px; align-items: center;" });
@@ -131,7 +132,7 @@ export async function renderStudiesView({ id, isEmbedded = false } = {}) {
  * Study Detail View (Flat rule-delimited layout with evaluation queue & status filter)
  */
 async function renderStudyDetail(sid, container) {
-  const head = pageHead(t("studyTitle", { id: sid }), t("studyDesc"), [
+  const head = pageHead(entityName(sid, "study"), t("studyDesc"), [
     el("button", "plain", { onclick: () => navigate("#/compose?step=4") }, "⬅️ " + t("btnBackToList")),
     el("button", "plain primary", {
       onclick: () => {
@@ -163,16 +164,16 @@ async function renderStudyDetail(sid, container) {
 
   const rId = el("div", "detail-kv-item");
   rId.appendChild(el("span", "kv-key", txt(t("fieldStudyId"))));
-  rId.appendChild(el("span", "kv-val mono", txt(sid)));
+  rId.appendChild(el("span", "kv-val mono", txt(entityName(sid, "study"))));
   metaGrid.appendChild(rId);
 
   const rProb = el("div", "detail-kv-item");
   rProb.appendChild(el("span", "kv-key", txt(t("metaProblem"))));
   if (s.problem_id) {
     const probWrap = el("span", "kv-val");
-    probWrap.appendChild(el("a", "mono", { href: `#/problem/${encodeURIComponent(s.problem_id)}` }, txt(s.problem_id)));
+    probWrap.appendChild(el("a", "mono", { href: `#/problem/${encodeURIComponent(s.problem_id)}` }, txt(entityName(s.problem_id, "problem"))));
     if (s.problem_revision !== undefined) {
-      probWrap.appendChild(el("span", "dim sub", txt(` @ `)));
+      probWrap.appendChild(el("span"));
       probWrap.appendChild(monoHash(s.problem_revision, { len: 12 }));
     }
     rProb.appendChild(probWrap);
@@ -183,7 +184,7 @@ async function renderStudyDetail(sid, container) {
 
   const rProf = el("div", "detail-kv-item");
   rProf.appendChild(el("span", "kv-key", txt(t("metaProfile"))));
-  rProf.appendChild(el("span", "kv-val", chip("info", s.automation_profile || "standard")));
+  rProf.appendChild(el("span", "kv-val", chip("info", t("profile_" + (s.automation_profile || "standard")))));
   metaGrid.appendChild(rProf);
 
   if (s.algorithm_run_id) {
@@ -223,7 +224,7 @@ async function renderStudyDetail(sid, container) {
         chipsWrap.querySelectorAll("button").forEach(b => b.classList.remove("primary"));
         btn.classList.add("primary");
       }
-    }, st === "all" ? t("filterAll") : st);
+    }, st === "all" ? t("filterAll") : statusName(st));
     chipsWrap.appendChild(btn);
   });
   filterBar.appendChild(chipsWrap);
@@ -272,15 +273,14 @@ async function renderStudyDetail(sid, container) {
 
       const tr = el("tr");
       const tdId = el("td");
-      tdId.appendChild(el("div", "mono mono-eval-id", { style: "font-weight: 600;", title: eid }, txt(eid)));
-      if (cand !== "—") {
-        tdId.appendChild(el("div", "sub dim", monoHash(cand, { len: 16, prefix: "cand: " })));
-      }
+      tdId.appendChild(el("div", "", t("runNumber", {number: evals.indexOf(ev) + 1})));
+      tdId.appendChild(technicalDetails(t("technicalDetails"),
+        el("code", "technical-code", eid), el("code", "technical-code", cand)));
       tr.appendChild(tdId);
 
       tr.appendChild(el("td", "", statusPill(ev.status)));
       tr.appendChild(el("td", "num mono", txt(ev.fidelity !== undefined ? ev.fidelity : "—")));
-      tr.appendChild(el("td", "mono", txt(ev.priority !== undefined ? ev.priority : "—")));
+      tr.appendChild(el("td", "mono", txt(t("priority_" + (ev.priority || "normal")))));
       tr.appendChild(el("td", "dim", txt(ev.wait_reason || "—")));
       tr.appendChild(el("td", "sub", txt(ev.wait_since ? fmtRelativeTime(ev.wait_since) : "—")));
 

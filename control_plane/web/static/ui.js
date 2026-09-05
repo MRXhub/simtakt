@@ -3,6 +3,7 @@
  * Swiss Technical Typography & Flat Graphic Design System
  */
 
+import { entityName } from "./display.js";
 import { t } from "./i18n.js";
 
 /**
@@ -105,41 +106,23 @@ export function tip(text, key) {
 /**
  * Monospace Truncated Hash / ID Formatter (guarantees zero horizontal overflow)
  */
-export function monoHash(hashStr, { len = 16, copyable = true, prefix = "", suffix = "", bold = false } = {}) {
-  if (!hashStr) return el("span", "dim", "—");
-  const fullStr = String(hashStr);
-  const isSha = fullStr.startsWith("sha256:");
-  const rawHash = isSha ? fullStr.replace(/^sha256:/, "") : fullStr;
-  const displayHash = rawHash.length > len ? rawHash.slice(0, len) + "…" : rawHash;
-  const displayFull = isSha ? `sha256:${displayHash}` : displayHash;
+export function technicalDetails(label, ...children) {
+  return el("details", "technical-details", el("summary", "", txt(label)),
+    el("div", "technical-content", ...children));
+}
 
-  const span = el("span", `mono mono-hash ${bold ? "mono-bold" : ""}`, {
-    title: fullStr,
-    "data-full-hash": fullStr
-  });
-  if (prefix && !displayFull.startsWith(prefix.trim())) span.appendChild(el("span", "mono-prefix dim", txt(prefix)));
-  span.appendChild(txt(displayFull));
-  if (suffix) span.appendChild(el("span", "mono-suffix dim", txt(suffix)));
-
-  if (copyable) {
-    span.classList.add("copyable");
-    span.onclick = (e) => {
-      e.stopPropagation();
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(fullStr).then(() => {
-          const originalTitle = span.title;
-          span.title = t("hashCopied") || "Copied!";
-          span.classList.add("copied");
-          setTimeout(() => {
-            span.title = originalTitle;
-            span.classList.remove("copied");
-          }, 1500);
-        }).catch(() => {});
-      }
-    };
-  }
-
-  return span;
+export function monoHash(hashStr, {label: customLabel} = {}) {
+  if (!hashStr || hashStr === "—") return el("span", "dim", "—");
+  const full = String(hashStr);
+  const copy = el("button", "plain", {type: "button", onclick: async () => {
+    try { await navigator.clipboard.writeText(full); copy.textContent = t("hashCopied"); }
+    catch { copy.textContent = t("copyManually"); }
+  }}, t("copyValue"));
+  const label = /sha256:|^[a-f0-9]{64}$/i.test(full) ? t("versionDetails") : entityName(full) === t("entity_record") ? t("identifierDetails") : entityName(full);
+  const details = technicalDetails(customLabel || label,
+    el("code", "technical-code", txt(full)), copy);
+  details.classList.add("technical-value");
+  return details;
 }
 
 /**
@@ -227,7 +210,8 @@ export function emptyPanel(title, desc) {
  */
 export function errorBlock(msg, hint) {
   const b = el("div", "error-block");
-  b.appendChild(el("h3", "", txt(msg)));
+  b.appendChild(el("h3", "", txt(t("errorSummary"))));
+  b.appendChild(technicalDetails(t("checkDetails"), el("pre", "technical-code", txt(msg))));
   if (hint) b.appendChild(el("p", "", txt(hint)));
   return b;
 }
@@ -235,6 +219,15 @@ export function errorBlock(msg, hint) {
 /**
  * Status Pill (Chip with state semantics)
  */
+export function statusName(status) {
+  const key = "status_" + String(status || "unknown").toLowerCase();
+  return t(key) === key ? t("status_unknown") : t(key);
+}
+
+export function showError(node, error) {
+  node.replaceChildren(txt(t("errorSummary")), technicalDetails(t("checkDetails"), el("pre", "technical-code", txt(error))));
+}
+
 export function statusPill(status) {
   const s = String(status || "unknown").toLowerCase();
   let tone = "neutral";
@@ -245,7 +238,7 @@ export function statusPill(status) {
   else if (s === "failed" || s === "unresolved" || s === "blocked") tone = "bad";
   else if (s === "cancelled" || s === "deduplicating") tone = "dim";
 
-  return chip(tone, s);
+  return chip(tone, statusName(s));
 }
 
 /**
@@ -261,9 +254,10 @@ export function entityPicker({
   onSelect,
   placeholder = t("pickerSelectPlaceholder") || "Select...",
   helpText = "",
-  required = false
+  required = false,
+  allowManual = true
 }) {
-  let isManual = items.length === 0;
+  let isManual = false;
   let currentValue = value || "";
 
   const container = el("div", "entity-picker");
@@ -271,7 +265,7 @@ export function entityPicker({
   head.appendChild(el("label", "entity-picker-label", txt(label), required ? el("span", { style: "color: var(--tone-bad-fg)" }, " *") : null));
 
   const toggleBtn = el("button", "entity-picker-mode-btn", { type: "button" });
-  head.appendChild(toggleBtn);
+  if (allowManual) head.appendChild(toggleBtn);
   container.appendChild(head);
 
   const bodyWrap = el("div", "entity-picker-body");
@@ -283,7 +277,7 @@ export function entityPicker({
 
   function renderMode() {
     bodyWrap.textContent = "";
-    if (!isManual && items.length > 0) {
+    if (!isManual) {
       toggleBtn.textContent = "✏️ " + (t("pickerManualFallback") || "Manual");
       const selRow = el("div", "entity-picker-select-row");
       const select = el("select", { id: id ? `${id}-select` : undefined });
@@ -303,7 +297,7 @@ export function entityPicker({
       });
 
       if (!found && currentValue) {
-        const customOpt = el("option", { value: currentValue, selected: true }, currentValue + " (custom)");
+        const customOpt = el("option", { value: currentValue, selected: true }, t("pickerCurrentSelection"));
         select.appendChild(customOpt);
       }
 
@@ -314,8 +308,7 @@ export function entityPicker({
       selRow.appendChild(select);
       bodyWrap.appendChild(selRow);
     } else {
-      toggleBtn.textContent = items.length > 0 ? "📋 " + (t("pickerSwitchDropdown") || "List") : "";
-      toggleBtn.style.display = items.length > 0 ? "inline-block" : "none";
+      toggleBtn.textContent = t("pickerSwitchDropdown");
 
       const inRow = el("div", "entity-picker-input-row");
       const input = el("input", {
@@ -391,13 +384,11 @@ export function preflightBox(validation, jsonError) {
   const list = el("div", "issue-list");
   issues.forEach(iss => {
     const item = el("div", "issue-item");
-    let tag = "ISSUE";
-    if (iss.code === "missing_parameter") tag = "MISSING";
-    else if (iss.code === "out_of_bounds") tag = "BOUNDS";
-    else if (iss.code === "type_mismatch") tag = "TYPE";
-    else if (iss.code === "unexpected_parameter") tag = "EXTRA";
-    item.appendChild(el("span", "issue-tag", tag));
-    item.appendChild(txt(iss.message || JSON.stringify(iss)));
+    const labels = {missing_parameter: "parameterMissing", out_of_bounds: "parameterBounds", type_mismatch: "parameterType", unexpected_parameter: "parameterExtra"};
+    item.appendChild(el("span", "issue-tag", t(labels[iss.code] || "parameterType")));
+    const name = iss.parameter || iss.parameter_name || iss.name || "";
+    item.appendChild(txt(t(iss.code === "out_of_bounds" ? "parameterBoundsIssue" : "parameterIssue", {name})));
+    item.appendChild(technicalDetails(t("checkDetails"), el("pre", "technical-code", iss.message || JSON.stringify(iss))));
     list.appendChild(item);
   });
   box.appendChild(list);

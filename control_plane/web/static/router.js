@@ -52,7 +52,7 @@ export function navigate(path) {
 export function updateDocTitle(route) {
   const titles = {
     overview: t("overviewTitle"),
-    compose: t("workbenchTitle"),
+    compose: t(route.step <= 3 ? "templatesTitle" : "researchTitle"),
     algorithms: t("algorithmsTitle"),
     algorithm: t("algorithmTitle", { id: route.id || "" }),
     capacity: t("capacityTitle"),
@@ -65,7 +65,7 @@ export function updateDocTitle(route) {
 export function markNav(route) {
   const navMap = {
     overview: "nav-overview",
-    compose: "nav-compose",
+    compose: route.step <= 3 ? "nav-templates" : "nav-compose",
     algorithms: "nav-algorithms",
     algorithm: "nav-algorithms",
     capacity: "nav-capacity",
@@ -74,7 +74,7 @@ export function markNav(route) {
 
   const navTitles = {
     overview: t("navOverview"),
-    compose: t("navCompose"),
+    compose: t(route.step <= 3 ? "navTemplates" : "navCompose"),
     algorithms: t("navAlgorithms"),
     algorithm: t("navAlgorithms"),
     capacity: t("navCapacity"),
@@ -82,15 +82,20 @@ export function markNav(route) {
   };
 
   const navElements = [
-    "nav-overview", "nav-compose", "nav-algorithms", "nav-capacity", "nav-shapes"
+    "nav-overview", "nav-compose", "nav-templates", "nav-algorithms", "nav-capacity", "nav-shapes"
   ];
 
   const activeId = navMap[route.name] || "nav-compose";
   navElements.forEach(id => {
     const el = document.getElementById(id);
     if (el) {
-      if (id === activeId) el.classList.add("cur");
-      else el.classList.remove("cur");
+      if (id === activeId) {
+        el.classList.add("cur");
+        el.setAttribute("aria-current", "page");
+      } else {
+        el.classList.remove("cur");
+        el.removeAttribute("aria-current");
+      }
     }
   });
 

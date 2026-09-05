@@ -22,3 +22,6 @@ CLAUDE.md
 .omp/
 .agents/
 .cursorrules
+
+# Optional browser-test dependencies.
+node_modules/

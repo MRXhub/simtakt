@@ -12,8 +12,9 @@
  */
 
 import { t, fmtRelativeTime, fmtDate, fmtClockTime } from "../i18n.js";
+import { entityName } from "../display.js";
 import { state } from "../state.js";
-import { el, txt, pageHead, emptyPanel, errorBlock, metricRail, chip, statusPill, tip, monoHash } from "../ui.js";
+import { el, txt, pageHead, emptyPanel, errorBlock, metricRail, chip, statusPill, tip, monoHash, technicalDetails } from "../ui.js";
 import { fetchJSON } from "../api.js";
 import { navigate } from "../router.js";
 
@@ -185,7 +186,7 @@ export async function renderAlgorithmsView({ id } = {}) {
       const aLink = el("a", "mono mono-run-id", {
         href: `#/algorithm/${encodeURIComponent(rid)}`,
         title: rid
-      }, txt(rid));
+      }, txt(entityName(rid)));
       tdId.appendChild(aLink);
       tr.appendChild(tdId);
 
@@ -195,7 +196,7 @@ export async function renderAlgorithmsView({ id } = {}) {
         const algoWrap = el("span", "algo-id-wrap");
         const algoSpan = el("span", "mono mono-algo-id", {
           title: run.algorithm_id
-        }, txt(run.algorithm_id));
+        }, txt(entityName(run.algorithm_id)));
         algoWrap.appendChild(algoSpan);
         if (run.algorithm_revision) {
           algoWrap.appendChild(monoHash(run.algorithm_revision, { len: 10, prefix: " @ " }));
@@ -283,7 +284,7 @@ async function renderAlgorithmDetail(aid, container) {
   const rAlgo = el("div", "detail-kv-item");
   rAlgo.appendChild(el("span", "kv-key", txt(t("metaAlgorithm") || "算法标识: ")));
   if (run.algorithm_id) {
-    const algoWrap = el("span", "kv-val mono", txt(run.algorithm_id));
+    const algoWrap = el("span", "kv-val mono", txt(entityName(run.algorithm_id)));
     if (run.algorithm_revision) {
       algoWrap.appendChild(monoHash(run.algorithm_revision, { len: 12, prefix: " @ " }));
     }
@@ -356,7 +357,7 @@ async function renderAlgorithmDetail(aid, container) {
     cfgSection.appendChild(cfgHead);
 
     const preWell = el("pre", "log-well mono", txt(JSON.stringify(run.configuration, null, 2)));
-    cfgSection.appendChild(preWell);
+    cfgSection.appendChild(technicalDetails(t("technicalDetails"), preWell));
     container.appendChild(cfgSection);
   }
 
@@ -390,7 +391,7 @@ async function renderAlgorithmDetail(aid, container) {
       tr.appendChild(el("td", "", chip("info", e.event_type || "event")));
       tr.appendChild(el("td", "", statusPill(e.run_status || run.status)));
       const payloadStr = JSON.stringify(e.payload || {});
-      tr.appendChild(el("td", "mono sub payload-trunc", { title: payloadStr }, txt(payloadStr)));
+      tr.appendChild(el("td", "", technicalDetails(t("technicalDetails"), el("pre", "technical-code", payloadStr))));
       tr.appendChild(el("td", "sub", txt(e.created_at ? fmtRelativeTime(e.created_at) : "—")));
       evTbody.appendChild(tr);
     });
@@ -423,7 +424,7 @@ async function renderAlgorithmDetail(aid, container) {
       tr.appendChild(el("td", "mono", { style: "font-weight: 600;" }, monoHash(res.algorithm_result_id, { len: 24 })));
       tr.appendChild(el("td", "", chip("ok", res.result_type || "optimal-parameter-set")));
       const resPayloadStr = JSON.stringify(res.payload || {});
-      tr.appendChild(el("td", "mono sub payload-trunc", { title: resPayloadStr }, txt(resPayloadStr)));
+      tr.appendChild(el("td", "", technicalDetails(t("technicalDetails"), el("pre", "technical-code", resPayloadStr))));
       rTbody.appendChild(tr);
     });
     resTable.appendChild(rTbody);

@@ -390,6 +390,7 @@ function getMockPayload(path) {
       items: [
         {
           package_name: "pkg-solar-cell-tcad",
+          deck_file_content: SAMPLE_DECKS.solar,
           artifact_id: "pkg.ten-junction-tcad",
           revision: "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0",
           status: "registered",
@@ -397,6 +398,7 @@ function getMockPayload(path) {
         },
         {
           package_name: "pkg-cmos-inverter",
+          deck_file_content: SAMPLE_DECKS.cmos,
           artifact_id: "pkg.cmos-inverter-hspice",
           revision: "sha256:b2c3d4e5f6a708192a3b4c5d6e7f809123456789abcdef0123456789abcdef1",
           status: "registered",

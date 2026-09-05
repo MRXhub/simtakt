@@ -34,6 +34,7 @@ from control_plane.evaluation.service import EvaluationMiddleware
 
 from control_plane.evaluation import mutation_views
 from control_plane.web.package_landing import PackageLandingService
+from control_plane.simulation.adapter_catalog import load_catalog, AdapterCatalogError
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8321
@@ -398,6 +399,8 @@ class DemoMiddleware:
                 "registered_at": s["registered_at"],
                 "extract_names": s.get("extract_names", []),
                 "parameter_count": param_count,
+                "problem_hint": schema_obj.get("problem_hint", ""),
+                "source_package": schema_obj.get("source_package"),
             })
         return results
 
@@ -552,6 +555,18 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
                 "writes_enabled": self.server.allow_writes,
                 "demo": self.server.demo,
             }
+        if path == "/api/template-options":
+            try:
+                catalog = load_catalog(self.server.project_root)
+            except AdapterCatalogError as exc:
+                raise _HttpError(409, str(exc)) from exc
+            runnable = [entry for entry in catalog if entry["status"] in {"active", "experimental"}]
+            return {"adapters": [
+                {"adapter_id": entry["adapter_id"], "name": entry.get("display_name", entry["adapter_id"]),
+                 "capabilities": entry["capabilities"],
+                 "selectable": sum(set(entry["capabilities"]).issubset(other["capabilities"]) for other in runnable) == 1}
+                for entry in runnable
+            ]}
         if path == "/api/capacity":
             topology = self.server.topology or parse_execution_topology(self.server.project_root)
             policy = self.server.policy or resolve_governed_scheduling_policy(self.server.project_root)
@@ -597,9 +612,11 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
             problem_id = urllib.parse.unquote(path[len("/api/problems/"):])
             studies = self.server.middleware.list_studies(problem_id)
             evaluations = self.server.middleware.list_problem_evaluations(problem_id)
-            if not studies and not evaluations:
+            definitions = [p for p in self.server.middleware.list_problems() if p["problem_id"] == problem_id]
+            if not definitions and not studies and not evaluations:
                 raise _HttpError(404, f"unknown Problem: {problem_id}")
-            return {"problem_id": problem_id, "studies": studies, "evaluations": evaluations}
+            return {"problem_id": problem_id, "problem": definitions[-1] if definitions else None,
+                    "studies": studies, "evaluations": evaluations}
         if path == "/api/studies":
             return {"items": self.server.middleware.list_studies()}
         if path.startswith("/api/studies/"):

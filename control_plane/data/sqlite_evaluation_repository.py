@@ -868,6 +868,8 @@ class SQLiteEvaluationRepository:
                         "registered_at": str(r["registered_at"]),
                         "extract_names": extract_names,
                         "parameter_count": parameter_count,
+                        "problem_hint": schema_obj.get("problem_hint", ""),
+                        "source_package": schema_obj.get("source_package"),
                     }
                 )
             return results

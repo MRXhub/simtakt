@@ -12,8 +12,9 @@
 
 import { t, fmtNumericValue } from "../i18n.js";
 import { state } from "../state.js";
-import { el, txt, tip, chip, preflightBox, entityPicker } from "../ui.js";
-import { fetchJSON, postJSON, mockSchemas, validateCandidateLocally } from "../api.js";
+import { el, txt, tip, chip, preflightBox, entityPicker, emptyPanel, technicalDetails, showError } from "../ui.js";
+import { fetchJSON, postJSON, mockSchemas, validateCandidateLocally, IS_MOCK } from "../api.js";
+import { entityName } from "../display.js";
 import { navigate } from "../router.js";
 
 const DEFAULT_SHA256 = "sha256:" + "0".repeat(64);
@@ -34,6 +35,18 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
   const cdState = state.candidateDesigner;
   const container = el("div", "candidate-workbench-view");
 
+  if (!IS_MOCK) {
+    const study = state.studiesList.find(row => row.study_id === cdState.studyId) || state.studiesList[0];
+    if (!study) {
+      container.appendChild(emptyPanel(t("chooseStudy"), t("createStudyFirst")));
+      container.appendChild(el("button", "plain primary", {onclick: () => navigate("#/compose?step=4")}, t("btnNewStudy")));
+      return container;
+    }
+    cdState.studyId = study.study_id;
+    cdState.problemId = study.problem_id;
+    cdState.problemRev = study.problem_revision;
+  }
+
   // Collapsible Swiss Field Guide
   const guide = el("details", "guide-details");
   guide.appendChild(el("summary", "", el("span", "guide-icon", "ℹ "), txt(t("candidateGuideSummary"))));
@@ -43,6 +56,18 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
   // Single Earned Action Surface Container for Candidate Composition & Dispatch
   const actionSurface = el("section", "action-surface candidate-designer-surface");
   container.appendChild(actionSurface);
+  let draftVersion = 0;
+  function invalidatePreview() {
+    draftVersion += 1;
+    cdState.previewResult = null;
+    cdState.lastSubmittedEval = null;
+    const submit = actionSurface.querySelector("#btn-confirm-eval");
+    if (submit) submit.disabled = true;
+    const preview = actionSurface.querySelector("pre.preview");
+    if (preview) preview.textContent = "";
+  }
+  actionSurface.addEventListener("input", invalidatePreview);
+  actionSurface.addEventListener("change", invalidatePreview);
 
   // ================= 1. Target Study Injection Strip =================
   const studyTargetBox = el("div", "target-study-strip");
@@ -59,23 +84,25 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
     items: state.studiesList,
     itemToOption: (s) => ({
       value: s.study_id || s,
-      label: s.study_id || s,
-      sub: s.problem_id ? `problem: ${s.problem_id}` : undefined
+      label: entityName(s.study_id || s, "study")
     }),
     onSelect: (val) => {
       cdState.studyId = val;
       const matched = state.studiesList.find(s => (s.study_id || s) === val);
       if (matched && matched.problem_id) {
         cdState.problemId = matched.problem_id;
-        const matchedProb = state.problemsList.find(p => p.problem_id === matched.problem_id);
+        const matchedProb = state.problemsList.find(p => p.problem_id === matched.problem_id && (p.problem_revision || p.revision) === matched.problem_revision);
         cdState.problemRev = normalizeSha256Revision(
           (matchedProb && (matchedProb.problem_revision || matchedProb.revision)) || matched.problem_revision,
           DEFAULT_SHA256
         );
-        refreshDesigner();
+        if (matchedProb && matchedProb.parameter_schema_revision) {
+          revInput.value = matchedProb.parameter_schema_revision;
+          loadSchema(matchedProb.parameter_schema_revision);
+        } else refreshDesigner();
       }
     },
-    placeholder: "study:..."
+    placeholder: t("chooseStudy")
   });
   studyPickerRow.appendChild(studyPicker.node);
 
@@ -95,7 +122,14 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
   revField.appendChild(el("label", "", txt(t("fieldSchemaRevision"))));
 
   const revInputGroup = el("div", { style: "display: flex; gap: 8px; align-items: center;" });
-  const activeRev = cdState.schemaRev || state.schemaDraft.registeredRevision || state.packagesSchemaRev || "sha256:mock-schema-ten-junction-v1";
+  const boundProblem = state.problemsList.find(p => p.problem_id === cdState.problemId &&
+    (p.problem_revision || p.revision) === cdState.problemRev) || state.problemsList.find(p => p.problem_id === cdState.problemId);
+  const activeRev = (boundProblem && boundProblem.parameter_schema_revision) || cdState.schemaRev || state.schemaDraft.registeredRevision || state.packagesSchemaRev;
+  if (activeRev !== cdState.schemaRev || cdState.loadedSchemaRev !== activeRev) {
+    cdState.schemaRev = activeRev;
+    cdState.schemaDoc = null;
+    cdState.previewResult = null;
+  }
   const revInput = el("input", {
     type: "text",
     id: "c-schema-rev",
@@ -115,7 +149,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
   revInputGroup.appendChild(derefBtn);
   revField.appendChild(revInputGroup);
   revRow.appendChild(revField);
-  actionSurface.appendChild(revRow);
+  actionSurface.appendChild(technicalDetails(t("templateConnectionDetails"), revRow));
 
   // Preset schema buttons
   const presetBar = el("div", "deck-samples", { style: "margin-top: 8px;" });
@@ -139,28 +173,34 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
   if (state.schemaDraft.registeredRevision) {
     presetBar.appendChild(makePresetBtn(t("presetSchemaDraft", { rev: state.schemaDraft.registeredRevision.slice(0, 14) + "…" }), state.schemaDraft.registeredRevision));
   }
-  actionSurface.appendChild(presetBar);
+  if (IS_MOCK) actionSurface.appendChild(presetBar);
 
   const derefMsg = el("div", "submit-msg", { style: "margin-top: 4px; margin-bottom: 12px;" });
   actionSurface.appendChild(derefMsg);
 
+  let schemaLoadSequence = 0;
   // Schema Loader
   async function loadSchema(rev) {
+    const sequence = ++schemaLoadSequence;
     if (!rev) {
       derefMsg.className = "submit-msg err";
       derefMsg.textContent = t("errNoSchemaLoaded");
       return;
     }
+    invalidatePreview();
+    cdState.schemaDoc = null;
+    refreshDesigner();
     derefBtn.disabled = true;
     derefMsg.className = "submit-msg";
     derefMsg.textContent = t("connecting");
 
     const r = await fetchJSON(`/api/schemas/${encodeURIComponent(rev)}`);
+    if (sequence !== schemaLoadSequence) return;
     derefBtn.disabled = false;
 
     if (!r || !r.ok || !r.data) {
       derefMsg.className = "submit-msg err";
-      derefMsg.textContent = (r && r.data && r.data.error) || t("netError");
+      showError(derefMsg, (r && r.data && r.data.error) || t("netError"));
       cdState.schemaDoc = null;
       return;
     }
@@ -168,6 +208,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
     const doc = r.data.schema || r.data;
     cdState.schemaDoc = doc;
     cdState.schemaRev = rev;
+    cdState.loadedSchemaRev = rev;
 
     // Initialize default params from schema
     const initialParams = {};
@@ -193,27 +234,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
 
   derefBtn.onclick = () => loadSchema(revInput.value.trim());
 
-  // Auto load mock schema if available
   const effectiveSchemaRev = cdState.schemaRev || activeRev;
-  if (!cdState.schemaDoc && effectiveSchemaRev) {
-    if (mockSchemas[effectiveSchemaRev]) {
-      cdState.schemaDoc = mockSchemas[effectiveSchemaRev];
-      cdState.schemaRev = effectiveSchemaRev;
-      if (!cdState.params || Object.keys(cdState.params).length === 0) {
-        const initialParams = {};
-        (cdState.schemaDoc.parameters || []).forEach(p => {
-          if (p.role === "variable") {
-            initialParams[p.name] = (p.default !== undefined) ? p.default : (p.bounds ? p.bounds.min : 1.0);
-          }
-        });
-        cdState.params = initialParams;
-        cdState.rawJson = JSON.stringify(initialParams, null, 2);
-      }
-      cdState.validation = validateCandidateLocally(cdState.schemaDoc, cdState.params);
-    } else {
-      loadSchema(effectiveSchemaRev);
-    }
-  }
 
   // Dynamic Designer Workspace Area
   const dynamicArea = el("div", "designer-dynamic-area");
@@ -221,7 +242,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
 
   function refreshDesigner() {
     dynamicArea.textContent = "";
-    const doc = cdState.schemaDoc || (effectiveSchemaRev ? mockSchemas[effectiveSchemaRev] : null);
+    const doc = cdState.schemaDoc || (IS_MOCK && effectiveSchemaRev ? mockSchemas[effectiveSchemaRev] : null);
 
     if (!doc) {
       dynamicArea.appendChild(el("div", "dim sub", { style: "margin-top: 14px; font-style: italic;" }, txt(t("errNoSchemaLoaded"))));
@@ -273,7 +294,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
         metaCol.appendChild(el("span", "param-meta-name", txt(p.name)));
 
         const badgeRow = el("div", "param-meta-badges");
-        badgeRow.appendChild(chip("info", p.type || "float"));
+        badgeRow.appendChild(chip("info", t("type_" + (p.type || "float"))));
         if (p.unit) badgeRow.appendChild(chip("warn", p.unit));
         if (p.bounds) {
           badgeRow.appendChild(el("span", "mono sub", txt(`[${p.bounds.min}, ${p.bounds.max}]`)));
@@ -429,7 +450,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
     dynamicArea.appendChild(evSectionTitle);
 
     // Problem ID & Revision Row
-    const matchedProblem = state.problemsList.find(p => p.problem_id === cdState.problemId);
+    const matchedProblem = state.problemsList.find(p => p.problem_id === cdState.problemId && (p.problem_revision || p.revision) === cdState.problemRev);
     const matchedProbRev = matchedProblem && (matchedProblem.problem_revision || matchedProblem.revision);
     const effectiveProbRev = normalizeSha256Revision(
       matchedProbRev || cdState.problemRev,
@@ -437,34 +458,15 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
     );
     cdState.problemRev = effectiveProbRev;
     const probRow = el("div", "form-row");
-    const probPicker = entityPicker({
-      label: t("fieldCandProblemId"),
-      id: "e-pid",
-      value: cdState.problemId || "demo-problem",
-      items: state.problemsList,
-      itemToOption: (p) => ({ value: p.problem_id || p, label: p.problem_id || p, sub: p.problem_revision || p.revision }),
-      onSelect: (val) => {
-        cdState.problemId = val;
-        const matched = state.problemsList.find(p => p.problem_id === val);
-        if (matched) {
-          cdState.problemRev = normalizeSha256Revision(
-            matched.problem_revision || matched.revision,
-            DEFAULT_SHA256
-          );
-          const prevIn = document.getElementById("e-prev");
-          if (prevIn) prevIn.value = cdState.problemRev;
-        }
-      }
-    });
-    probRow.appendChild(probPicker.node);
+    probRow.appendChild(el("label", "form-field", t("fieldProblemIdTechnical"),
+      el("input", {id: "e-pid", value: cdState.problemId, readOnly: true})));
 
     const prevField = el("div", "form-field");
     prevField.appendChild(el("label", "", txt(t("fieldProblemRevision"))));
-    const prevIn = el("input", { type: "text", id: "e-prev", className: "mono", value: cdState.problemRev });
-    prevIn.oninput = () => { cdState.problemRev = prevIn.value.trim(); };
+    const prevIn = el("input", { type: "text", id: "e-prev", className: "mono", value: cdState.problemRev, readOnly: true });
     prevField.appendChild(prevIn);
     probRow.appendChild(prevField);
-    dynamicArea.appendChild(probRow);
+    const runAdvanced = technicalDetails(t("advancedSettings"), probRow);
 
     // Fidelity Row
     const fidRow = el("div", "form-row one");
@@ -526,6 +528,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
       if (!cdState.requestedOutputs.includes(val)) cdState.requestedOutputs.push(val);
       customIn.value = "";
       cdState.customExtractInput = "";
+      invalidatePreview();
       renderExtractCheckboxes();
     };
     customRow.appendChild(customIn);
@@ -559,7 +562,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
     };
     indField.appendChild(indSelect);
     indepRow.appendChild(indField);
-    dynamicArea.appendChild(indepRow);
+    runAdvanced.lastElementChild.appendChild(indepRow);
 
     // Priority (verbatim text) & Replicate Key (gated) Row
     const prioRow = el("div", "form-row");
@@ -595,7 +598,8 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
     const repHelp = el("div", "form-help", txt(""));
     repField.appendChild(repHelp);
     prioRow.appendChild(repField);
-    dynamicArea.appendChild(prioRow);
+    runAdvanced.lastElementChild.appendChild(prioRow);
+    dynamicArea.appendChild(runAdvanced);
 
     function updateReplicateKeyGating() {
       const isIndependent = cdState.independence === "independent";
@@ -630,7 +634,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
     const em = el("div", "submit-msg", { style: "margin-top: 8px;" });
     const ep = el("pre", "preview log-well", { style: "margin-top: 10px;" });
     dynamicArea.appendChild(em);
-    dynamicArea.appendChild(ep);
+    dynamicArea.appendChild(technicalDetails(t("requestDetails"), ep));
 
     function updateActionButtonsState() {
       const isBlocked = !!cdState.jsonError || !cdState.validation || !cdState.validation.valid;
@@ -664,7 +668,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
     if (cdState.lastSubmittedEval) {
       const { evalId, studyId } = cdState.lastSubmittedEval;
       em.className = "submit-msg ok";
-      em.textContent = `🚀 ${t("msgEvalSubmitted")} Evaluation ID: ${evalId} ➔ ${t("targetStudyLabel", { id: studyId })}`;
+      em.textContent = t("msgEvalSubmitted");
       const toQueueBtn = el("button", "plain primary", {
         style: "margin-top: 8px;",
         onclick: () => {
@@ -682,12 +686,13 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
         return;
       }
 
+      const version = draftVersion;
       previewBtn.disabled = true;
       em.className = "submit-msg";
       em.textContent = t("connecting");
 
       const probId = cdState.problemId || (state.problemsList[0] && state.problemsList[0].problem_id) || "demo-problem";
-      const matchedProb = state.problemsList.find(p => p.problem_id === probId);
+      const matchedProb = state.problemsList.find(p => p.problem_id === probId && (p.problem_revision || p.revision) === cdState.problemRev);
       const matchedProbRev = matchedProb && (matchedProb.problem_revision || matchedProb.revision);
       const probRev = normalizeSha256Revision(
         matchedProbRev || cdState.problemRev,
@@ -700,10 +705,11 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
       };
 
       const cr = await postJSON("/api/contracts/build", { kind: "candidate", spec: candSpec });
+      if (version !== draftVersion) { previewBtn.disabled = false; return; }
       if (!cr || !cr.ok || !cr.data) {
         previewBtn.disabled = false;
         em.className = "submit-msg err";
-        em.textContent = (cr && cr.data && cr.data.error) || t("netError");
+        showError(em, (cr && cr.data && cr.data.error) || t("netError"));
         return;
       }
 
@@ -721,10 +727,11 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
 
       const rr = await postJSON("/api/contracts/build", { kind: "evaluation_request", spec: reqSpec });
       previewBtn.disabled = false;
+      if (version !== draftVersion) return;
 
       if (!rr || !rr.ok || !rr.data) {
         em.className = "submit-msg err";
-        em.textContent = (rr && rr.data && rr.data.error) || t("netError");
+        showError(em, (rr && rr.data && rr.data.error) || t("netError"));
         return;
       }
 
@@ -732,7 +739,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
       cdState.previewResult = { candidate: cdState.candidateContract, evaluation_request: cdState.requestContract };
 
       em.className = "submit-msg ok";
-      em.textContent = `${t("msgPreviewDone")} (${t("targetStudyLabel", { id: cdState.studyId || "demo-study-a" })})`;
+      em.textContent = `${t("msgPreviewDone")} (${t("targetStudyLabel", { id: entityName(cdState.studyId, "study") })})`;
       ep.textContent = JSON.stringify(cdState.previewResult, null, 2);
 
       updateActionButtonsState();
@@ -761,7 +768,7 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
 
       if (!r || !r.ok || !r.data) {
         em.className = "submit-msg err";
-        em.textContent = (r && r.data && r.data.error) || t("netError");
+        showError(em, (r && r.data && r.data.error) || t("netError"));
         return;
       }
 
@@ -784,6 +791,28 @@ export function renderCandidateDesigner({ onSubmitted } = {}) {
       em.appendChild(el("div", { style: "margin-top: 6px;" }, toQueueBtn));
       if (onSubmitted) onSubmitted(r.data);
     };
+  }
+
+  // Auto load mock schema if available
+  if (!cdState.schemaDoc && effectiveSchemaRev) {
+    if (IS_MOCK && mockSchemas[effectiveSchemaRev]) {
+      cdState.schemaDoc = mockSchemas[effectiveSchemaRev];
+      cdState.schemaRev = effectiveSchemaRev;
+      cdState.loadedSchemaRev = effectiveSchemaRev;
+      if (!cdState.params || Object.keys(cdState.params).length === 0) {
+        const initialParams = {};
+        (cdState.schemaDoc.parameters || []).forEach(p => {
+          if (p.role === "variable") {
+            initialParams[p.name] = (p.default !== undefined) ? p.default : (p.bounds ? p.bounds.min : 1.0);
+          }
+        });
+        cdState.params = initialParams;
+        cdState.rawJson = JSON.stringify(initialParams, null, 2);
+      }
+      cdState.validation = validateCandidateLocally(cdState.schemaDoc, cdState.params);
+    } else {
+      loadSchema(effectiveSchemaRev);
+    }
   }
 
   refreshDesigner();

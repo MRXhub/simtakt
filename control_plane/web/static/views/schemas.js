@@ -12,8 +12,10 @@
 
 import { t, fmtNumericValue } from "../i18n.js";
 import { state } from "../state.js";
-import { el, txt, pageHead, emptyPanel, errorBlock, chip, monoHash } from "../ui.js";
-import { fetchJSON, postJSON, mockSchemas } from "../api.js";
+import { el, txt, pageHead, emptyPanel, errorBlock, chip, monoHash, technicalDetails } from "../ui.js";
+import { fetchJSON, postJSON, mockSchemas, IS_MOCK } from "../api.js";
+import { entityName } from "../display.js";
+import { saveTemplate } from "../template.js";
 import { navigate } from "../router.js";
 
 const PRESET_SCHEMAS = {
@@ -87,6 +89,31 @@ export async function renderSchemasView({ revision } = {}) {
     return renderSchemaDetail(revision, container);
   }
 
+  const [optionsResult, problemsResult] = await Promise.all([
+    fetchJSON("/api/template-options"), fetchJSON("/api/problems")
+  ]);
+  const adapters = optionsResult?.ok ? optionsResult.data.adapters || [] : [];
+  if (problemsResult?.ok) state.problemsList = problemsResult.data.items || [];
+  let saving = false;
+  function configForDraft() {
+    const draft = state.schemaDraft;
+    const key = draft.doc.source_package?.artifact_id || "new";
+    if (!draft.templateConfig || draft.templateConfig.sourceKey !== key) {
+      const existing = state.problemsList.find(p => p.parameter_schema_revision === draft.registeredRevision);
+      const available = adapters.filter(a => a.selectable);
+      const adapter = available.length === 1 ? available[0] : null;
+      draft.templateConfig = {
+        sourceKey: key,
+        problemId: existing?.problem_id || "problem:" + crypto.randomUUID(),
+        constraintRevision: existing?.constraint_revision || "sha256:" + "0".repeat(64),
+        metricRevision: existing?.metric_schema_revision || "sha256:" + "1".repeat(64),
+        capabilities: existing?.simulation_capabilities || adapter?.capabilities || [],
+        adapterId: adapters.find(a => existing?.simulation_capabilities?.every(c => a.capabilities.includes(c)))?.adapter_id || adapter?.adapter_id || ""
+      };
+    }
+    return draft.templateConfig;
+  }
+
   // Collapsible Swiss Field Guide
   const guide = el("details", "guide-details");
   guide.appendChild(el("summary", "", el("span", "guide-icon", "ℹ "), txt(t("schemasGuideSummary"))));
@@ -100,6 +127,15 @@ export async function renderSchemasView({ revision } = {}) {
   function renderDraftWorkspace() {
     draftSection.textContent = "";
     const draft = state.schemaDraft;
+    const config = configForDraft();
+    if (!IS_MOCK && !draft.doc.source_package?.artifact_id) {
+      draftSection.appendChild(emptyPanel(t("importModelFirst"), t("importModelHelp")));
+      draftSection.appendChild(el("button", "plain primary", {onclick: () => navigate("#/compose?step=1")}, t("templateFiles")));
+      return;
+    }
+    if (draft.doc.source_package) draftSection.appendChild(el("div", "template-source form-help",
+      t("modelSource") + ": " + entityName(draft.doc.source_package.artifact_id, "package")));
+
 
     // Preset Seed Buttons Bar
     const sampleBar = el("div", "deck-samples");
@@ -146,12 +182,12 @@ export async function renderSchemasView({ revision } = {}) {
       renderDraftWorkspace();
     };
     sampleBar.appendChild(clearDraftBtn);
-    draftSection.appendChild(sampleBar);
+    if (IS_MOCK) draftSection.appendChild(sampleBar);
 
     // Registration Success Banner or Draft Status Strip
-    if (draft.registeredRevision) {
+    if (draft.registeredRevision && draft.savedTemplate) {
       const regBanner = el("div", "schema-registered-banner");
-      const titleSpan = el("div", "schema-registered-title", txt(`✓ ${t("schemaDraftRegistered", { rev: draft.registeredRevision.slice(0, 16) + "…" })}`));
+      const titleSpan = el("div", "schema-registered-title", txt(`✓ ${t("templateSaved")}`));
       regBanner.appendChild(titleSpan);
 
       const regActions = el("div", { style: "display: flex; gap: 8px; flex-wrap: wrap;" });
@@ -163,23 +199,16 @@ export async function renderSchemasView({ revision } = {}) {
       };
       regActions.appendChild(newDraftBtn);
 
-      const toProbBtn = el("button", "plain", txt("📐 " + t("toStepProblem")));
-      toProbBtn.type = "button";
-      toProbBtn.onclick = () => {
-        state.candidateDesigner.schemaRev = draft.registeredRevision;
-        navigate("#/compose?step=3");
-      };
-      regActions.appendChild(toProbBtn);
-
-      const toCandBtn = el("button", "plain primary", txt("⚡ " + t("toStepCandidate")));
+      const toCandBtn = el("button", "plain primary", txt("⚡ " + t("toStepStudy")));
       toCandBtn.type = "button";
       toCandBtn.onclick = () => {
         state.candidateDesigner.schemaRev = draft.registeredRevision;
-        navigate("#/compose?step=5");
+        navigate("#/compose?step=4");
       };
       regActions.appendChild(toCandBtn);
 
       regBanner.appendChild(regActions);
+      regBanner.appendChild(technicalDetails(t("technicalDetails"), monoHash(draft.registeredRevision), monoHash(draft.savedTemplate.revision)));
       draftSection.appendChild(regBanner);
     } else {
       const draftNotice = el("div", "schema-draft-status-strip");
@@ -227,8 +256,8 @@ export async function renderSchemasView({ revision } = {}) {
       hintField.appendChild(el("label", "", txt(t("fieldProblemHint"))));
       const hintIn = el("input", {
         type: "text",
-        value: draft.doc.problem_hint || "custom-schema",
-        placeholder: "solar-cell-tcad"
+        id: "template-name", value: draft.doc.problem_hint || "",
+        placeholder: t("templateNamePlaceholder")
       });
       hintIn.oninput = () => {
         draft.doc.problem_hint = hintIn.value.trim();
@@ -365,7 +394,7 @@ export async function renderSchemasView({ revision } = {}) {
         const tdType = el("td");
         const typeSel = el("select", { style: "width: 80px;" });
         ["float", "int", "bool", "string"].forEach(typ => {
-          const o = el("option", { value: typ }, typ);
+          const o = el("option", { value: typ }, t("type_" + typ));
           if (p.type === typ) o.selected = true;
           typeSel.appendChild(o);
         });
@@ -562,7 +591,7 @@ export async function renderSchemasView({ revision } = {}) {
         className: "deck-textarea mono",
         style: "min-height: 240px;",
         value: draft.rawJson,
-        "aria-label": "Schema JSON Source"
+        "aria-label": t("schemaSourceAria")
       });
 
       ta.oninput = () => {
@@ -592,20 +621,37 @@ export async function renderSchemasView({ revision } = {}) {
       draftSection.appendChild(jsonEditorWrap);
     }
 
+    const runtime = el("div", "template-runtime form-row one");
+    const solver = el("select", {id: "template-solver", "aria-label": t("simulationTool")});
+    solver.appendChild(el("option", {value: ""}, t("chooseSimulationTool")));
+    adapters.forEach(adapter => solver.appendChild(el("option", {
+      value: adapter.adapter_id, selected: adapter.adapter_id === config.adapterId, disabled: !adapter.selectable
+    }, adapter.name + (adapter.selectable ? "" : " · " + t("adapterAmbiguous")))));
+    solver.onchange = () => {
+      const chosen = adapters.find(a => a.adapter_id === solver.value);
+      config.adapterId = solver.value;
+      config.capabilities = chosen?.capabilities || [];
+      draft.registeredRevision = null;
+    };
+    runtime.appendChild(el("label", {for: "template-solver"}, t("simulationTool")));
+    runtime.appendChild(solver);
+    if (!adapters.length) runtime.appendChild(el("p", "form-help", t("noSimulationTool")));
+    draftSection.appendChild(runtime);
+    const advanced = technicalDetails(t("templateAdvanced"), el("p", "form-help", t("templateAdvancedHelp")));
+    for (const [key, label] of [["problemId", "fieldProblemIdTechnical"], ["constraintRevision", "fieldConstraintRev"], ["metricRevision", "fieldMetricSchemaRev"]]) {
+      const input = el("input", {value: config[key], "aria-label": t(label)});
+      input.oninput = () => { config[key] = input.value.trim(); draft.registeredRevision = null; };
+      advanced.lastElementChild.appendChild(el("label", "form-field", t(label), input));
+    }
+    draftSection.appendChild(advanced);
+
     // Action Row: Register + Advance Buttons
     const actRow = el("div", { style: "display: flex; gap: 8px; align-items: center; margin-top: 16px; flex-wrap: wrap;" });
     const regBtn = el("button", "plain primary", txt(t("btnRegisterSchema")));
     regBtn.type = "button";
     regBtn.id = "btn-reg-schema-draft";
 
-    const nextBtn = el("button", "plain", txt(t("toStepProblem")));
-    nextBtn.type = "button";
-    nextBtn.onclick = () => {
-      navigate("#/compose?step=3");
-    };
-
     actRow.appendChild(regBtn);
-    actRow.appendChild(nextBtn);
     draftSection.appendChild(actRow);
 
     const submitMsg = el("div", "submit-msg", { style: "margin-top: 8px;" });
@@ -616,6 +662,7 @@ export async function renderSchemasView({ revision } = {}) {
         regBtn.disabled = true;
         regBtn.title = t("fixJsonSyntaxFirst");
       } else {
+        regBtn.disabled = saving;
         if (!state.writes) regBtn.title = t("needAllowWrites");
         else regBtn.title = "";
       }
@@ -623,40 +670,41 @@ export async function renderSchemasView({ revision } = {}) {
     updateRegisterBtnState();
 
     regBtn.onclick = async () => {
-      if (draft.jsonError) return;
-      if (!state.writes) {
-        submitMsg.className = "submit-msg err";
-        submitMsg.textContent = t("readonlyNote");
-        return;
-      }
-
-      regBtn.disabled = true;
+      if (saving || draft.jsonError) return;
+      if (!state.writes) { submitMsg.textContent = t("readonlyNote"); return; }
+      if (!draft.doc.problem_hint?.trim()) { submitMsg.textContent = t("templateNameRequired"); return; }
+      if (!draft.doc.source_package?.artifact_id) { submitMsg.textContent = t("importModelFirst"); return; }
+      if (!config.capabilities.length || adapters.filter(a => config.capabilities.every(c => a.capabilities.includes(c))).length !== 1) { submitMsg.textContent = t("chooseSimulationTool"); return; }
+      saving = true;
+      const snapshot = structuredClone(draft.doc);
+      const settings = structuredClone(config);
+      const fingerprint = JSON.stringify([snapshot, settings]);
+      draftSection.querySelectorAll("input, select, textarea, button").forEach(node => { node.disabled = true; });
       submitMsg.className = "submit-msg";
-      submitMsg.textContent = t("connecting");
-
-      const submitDoc = JSON.parse(JSON.stringify(draft.doc));
-      delete submitDoc.extract_names;
-      const r = await postJSON("/api/schemas", submitDoc);
-      regBtn.disabled = false;
-
-      if (!r || !r.ok || !r.data) {
+      submitMsg.textContent = t("savingTemplate");
+      try {
+        const result = await saveTemplate(snapshot, settings);
+        // A route change or another editor must never label a changed draft as saved.
+        if (draft !== state.schemaDraft || fingerprint !== JSON.stringify([draft.doc, draft.templateConfig])) return;
+        draft.registeredRevision = result.schemaRevision;
+        draft.savedTemplate = result.problem;
+        draft.registeredAt = new Date().toISOString();
+        state.packagesSchemaRev = result.schemaRevision;
+        Object.assign(state.candidateDesigner, {schemaRev: result.schemaRevision, schemaDoc: snapshot,
+          problemId: result.problem.problem_id, problemRev: result.problem.revision});
+        const problems = await fetchJSON("/api/problems");
+        if (problems?.ok) state.problemsList = problems.data.items || [];
+        saving = false;
+        renderDraftWorkspace();
+        await refreshCatalogTable();
+      } catch (error) {
         submitMsg.className = "submit-msg err";
-        submitMsg.textContent = (r && r.data && r.data.error) || t("netError");
-        return;
+        submitMsg.replaceChildren(txt(t("templateSaveFailed")), technicalDetails(t("technicalDetails"), el("pre", "technical-code", error.message)));
+      } finally {
+        saving = false;
+        draftSection.querySelectorAll("input, select, textarea, button").forEach(node => { node.disabled = false; });
+        updateRegisterBtnState();
       }
-
-      const rev = r.data.revision || "sha256:registered";
-      draft.registeredRevision = rev;
-      draft.registeredAt = new Date().toISOString();
-      state.packagesSchemaRev = rev;
-      state.candidateDesigner.schemaRev = rev;
-      state.candidateDesigner.schemaDoc = JSON.parse(JSON.stringify(draft.doc));
-
-      submitMsg.className = "submit-msg ok";
-      submitMsg.textContent = t("schemaRegisteredOk", { rev });
-
-      renderDraftWorkspace();
-      refreshCatalogTable();
     };
   }
 
@@ -678,7 +726,7 @@ export async function renderSchemasView({ revision } = {}) {
     const r = await fetchJSON("/api/schemas");
     let schemas = (r && r.ok && r.data && (r.data.items || r.data.schemas || (Array.isArray(r.data) ? r.data : []))) || [];
 
-    if (schemas.length === 0 && Object.keys(mockSchemas).length > 0) {
+    if (IS_MOCK && schemas.length === 0 && Object.keys(mockSchemas).length > 0) {
       schemas = Object.keys(mockSchemas).map(rev => ({
         revision: rev,
         kind: mockSchemas[rev].kind || "parameter-schema",
@@ -721,15 +769,14 @@ export async function renderSchemasView({ revision } = {}) {
       const tdRev = el("td", "col-problem-id");
       const aRev = el("a", "mono", {
         href: `#/schema/${encodeURIComponent(rev)}`,
-        title: rev
-      }, monoHash(rev, { len: 16 }));
+      }, txt(entityName(rev, "schema")));
       tdRev.appendChild(aRev);
       tr.appendChild(tdRev);
 
-      tr.appendChild(el("td", "", chip("info", kind)));
+      tr.appendChild(el("td", "", chip(state.problemsList.some(p => p.parameter_schema_revision === rev) ? "ok" : "warn", t(state.problemsList.some(p => p.parameter_schema_revision === rev) ? "templateReady" : "templateIncomplete"))));
       tr.appendChild(el("td", "num mono", txt(pCount)));
       tr.appendChild(el("td", "num mono", txt(eCount)));
-      tr.appendChild(el("td", "mono dim mono-art-id", { title: pkg }, txt(pkg)));
+      tr.appendChild(el("td", "mono dim mono-art-id", { title: pkg }, txt(entityName(pkg, "package"))));
 
       const tdAct = el("td", "num");
       const actGroup = el("div", { style: "display: inline-flex; gap: 5px; align-items: center;" });
@@ -739,37 +786,32 @@ export async function renderSchemasView({ revision } = {}) {
         title: t("tipLoadSchemaToDraft"),
         onclick: async () => {
           const res = await fetchJSON(`/api/schemas/${encodeURIComponent(rev)}`);
-          const doc = (res && res.ok && res.data) ? (res.data.schema || res.data) : (mockSchemas[rev] || null);
+          const doc = (res && res.ok && res.data) ? (res.data.schema || res.data) : (IS_MOCK ? mockSchemas[rev] || null : null);
           if (doc) {
             state.schemaDraft.doc = JSON.parse(JSON.stringify(doc));
             state.schemaDraft.rawJson = JSON.stringify(doc, null, 2);
             state.schemaDraft.jsonError = null;
             state.schemaDraft.registeredRevision = rev;
+            state.schemaDraft.templateConfig = null;
+            state.schemaDraft.savedTemplate = state.problemsList.find(p => p.parameter_schema_revision === rev) || null;
             renderDraftWorkspace();
             window.scrollTo({ top: 0, behavior: "smooth" });
           }
         }
       }, t("btnForkDraftFromSchema"));
 
-      const probBtn = el("button", "plain", {
-        style: "padding: 2px 6px; font-size: 11px;",
-        onclick: () => {
-          state.candidateDesigner.schemaRev = rev;
-          state.packagesSchemaRev = rev;
-          navigate("#/compose?step=3");
-        }
-      }, "📐 " + t("btnRegisterProblem"));
-
       const candBtn = el("button", "plain primary", {
         style: "padding: 2px 6px; font-size: 11px;",
         onclick: () => {
-          state.candidateDesigner.schemaRev = rev;
-          navigate("#/compose?step=5");
+          const problem = state.problemsList.find(p => p.parameter_schema_revision === rev);
+          if (!problem) { seedDraftBtn.click(); return; }
+          Object.assign(state.candidateDesigner, {schemaRev: rev, problemId: problem.problem_id, problemRev: problem.revision});
+          navigate("#/compose?step=4");
         }
       }, "⚡ " + t("btnDesignCandidate"));
 
       actGroup.appendChild(seedDraftBtn);
-      actGroup.appendChild(probBtn);
+
       actGroup.appendChild(candBtn);
       tdAct.appendChild(actGroup);
       tr.appendChild(tdAct);
@@ -790,7 +832,7 @@ export async function renderSchemasView({ revision } = {}) {
  * Schema Detail View (Clean flat layout without generic card wrappers)
  */
 async function renderSchemaDetail(rev, container) {
-  let doc = mockSchemas[rev] || null;
+  let doc = IS_MOCK ? mockSchemas[rev] || null : null;
   if (!doc) {
     const r = await fetchJSON(`/api/schemas/${encodeURIComponent(rev)}`);
     if (r && r.ok && r.data) {
@@ -798,7 +840,7 @@ async function renderSchemaDetail(rev, container) {
     }
   }
 
-  const head = pageHead(t("schemaTitle", { rev: rev.slice(0, 16) + "…" }), t("schemaDesc"), [
+  const head = pageHead(doc?.problem_hint || t("entity_schema"), t("schemaDesc"), [
     el("button", "plain", { onclick: () => navigate("#/compose?step=2") }, "⬅️ " + t("btnBackToList")),
     el("button", "plain", {
       onclick: () => {
@@ -807,21 +849,18 @@ async function renderSchemaDetail(rev, container) {
           state.schemaDraft.rawJson = JSON.stringify(doc, null, 2);
           state.schemaDraft.jsonError = null;
           state.schemaDraft.registeredRevision = rev;
+          state.schemaDraft.templateConfig = null;
+          state.schemaDraft.savedTemplate = state.problemsList.find(p => p.parameter_schema_revision === rev) || null;
         }
         navigate("#/compose?step=2");
       }
     }, t("btnForkDraftFromSchema")),
-    el("button", "plain", {
-      onclick: () => {
-        state.candidateDesigner.schemaRev = rev;
-        state.packagesSchemaRev = rev;
-        navigate("#/compose?step=3");
-      }
-    }, t("btnCreateProblemWithSchema")),
     el("button", "plain primary", {
       onclick: () => {
-        state.candidateDesigner.schemaRev = rev;
-        navigate("#/compose?step=5");
+        const problem = state.problemsList.find(p => p.parameter_schema_revision === rev);
+        if (!problem) { navigate("#/compose?step=2"); return; }
+        Object.assign(state.candidateDesigner, {schemaRev: rev, problemId: problem.problem_id, problemRev: problem.revision});
+        navigate("#/compose?step=4");
       }
     }, t("btnDesignCandidateWithSchema"))
   ]);
@@ -846,7 +885,7 @@ async function renderSchemaDetail(rev, container) {
 
   const rKind = el("div", "detail-kv-item");
   rKind.appendChild(el("span", "kv-key", txt(t("metaKind"))));
-  rKind.appendChild(el("span", "kv-val", chip("info", doc.kind || "parameter-schema")));
+  rKind.appendChild(el("span", "kv-val", chip("info", t("schemaKindLabel"))));
   metaGrid.appendChild(rKind);
 
   if (doc.problem_hint) {

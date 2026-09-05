@@ -11,7 +11,7 @@
 
 import { t, fmtClockTime, fmtDate } from "../i18n.js";
 import { state } from "../state.js";
-import { el, txt, pageHead, emptyPanel, chip, monoHash } from "../ui.js";
+import { el, txt, pageHead, emptyPanel, chip, monoHash, technicalDetails, showError } from "../ui.js";
 import { postJSON, fetchJSON, SAMPLE_DECKS } from "../api.js";
 import { navigate } from "../router.js";
 
@@ -121,7 +121,7 @@ export function renderPackagesView() {
     className: "deck-textarea mono",
     placeholder: t("deckPlaceholder") || "set param = 1.0 ...",
     value: state.packagesDeckText || SAMPLE_DECKS.solar,
-    "aria-label": "Simulation Deck Source Code"
+    "aria-label": t("deckSourceAria")
   });
   state.packagesDeckText = ta.value;
   ta.oninput = () => { state.packagesDeckText = ta.value; };
@@ -160,7 +160,7 @@ export function renderPackagesView() {
 
     if (!r || !r.ok || !r.data) {
       parseMsg.className = "submit-msg err";
-      parseMsg.textContent = (r && r.data && r.data.error) || t("netError") || "Network error";
+      showError(parseMsg, (r && r.data && r.data.error) || t("netError") || "Network error");
       return;
     }
 
@@ -203,7 +203,7 @@ export function renderPackagesView() {
 
     return {
       kind: "parameter-schema",
-      problem_hint: `problem:${pName.replace(/^pkg-/, "")}`,
+      problem_hint: pName.replace(/^pkg-/, ""),
       source_package: {
         artifact_id: artId,
         revision: pRev
@@ -241,6 +241,8 @@ export function renderPackagesView() {
         state.schemaDraft.rawJson = JSON.stringify(schemaDoc, null, 2);
         state.schemaDraft.jsonError = null;
         state.schemaDraft.registeredRevision = null;
+        state.schemaDraft.templateConfig = null;
+        state.schemaDraft.savedTemplate = null;
         state.schemaDraft.mode = "form";
         navigate("#/compose?step=2");
       }
@@ -355,9 +357,9 @@ export function renderPackagesView() {
 
     // Job Terminal Logs Viewer Inset
     const logBox = el("pre", "log-well mono preview", {
-      "aria-label": "Job execution logs"
+      "aria-label": t("importLogsAria")
     });
-    formWrap.appendChild(logBox);
+    formWrap.appendChild(technicalDetails(t("importDetails"), logBox));
 
     // Cross actions when job succeeds
     const crossActionsWrap = el("div", "cross-actions-strip");
@@ -377,26 +379,15 @@ export function renderPackagesView() {
             state.schemaDraft.doc = doc;
             state.schemaDraft.rawJson = JSON.stringify(doc, null, 2);
             state.schemaDraft.registeredRevision = null;
+            state.schemaDraft.templateConfig = null;
+            state.schemaDraft.savedTemplate = null;
           }
           navigate("#/compose?step=2");
         };
 
-        const prefillProbBtn = el("button", "plain", txt(t("btnPrefillProblem") || "向导：一键预填 Problem 注册"));
-        prefillProbBtn.type = "button";
-        prefillProbBtn.onclick = () => {
-          state.candidateDesigner.problemId = `problem:${state.packagesPackageName.replace(/^pkg-/, "")}`;
-          navigate("#/compose?step=3");
-        };
-
-        const openCandBtn = el("button", "plain", txt(t("btnOpenCandidateDesigner") || "前往 Candidate 设计器"));
-        openCandBtn.type = "button";
-        openCandBtn.onclick = () => {
-          navigate("#/compose?step=5");
-        };
-
         crossActionsWrap.appendChild(seedDraftAct);
-        crossActionsWrap.appendChild(prefillProbBtn);
-        crossActionsWrap.appendChild(openCandBtn);
+
+
       }
     }
     updateLogsUI();
@@ -419,7 +410,7 @@ export function renderPackagesView() {
 
       if (!r || !r.ok || !r.data) {
         landMsg.className = "submit-msg err";
-        landMsg.textContent = (r && r.data && r.data.error) || t("netError") || "Network error";
+        showError(landMsg, (r && r.data && r.data.error) || t("netError") || "Network error");
         return;
       }
 
@@ -429,10 +420,11 @@ export function renderPackagesView() {
       state.packagesJobLogs = [`[${fmtClockTime(new Date())}] [queued] Package landing job submitted. ID: ${jobId}`];
 
       landMsg.className = "submit-msg ok";
-      landMsg.textContent = `Job submitted: ${jobId} (HTTP 202)`;
+      landMsg.textContent = t("importSubmitted");
       updateLogsUI();
 
       startPackageJobPolling(jobId, () => {
+        landMsg.textContent = t(state.packagesJobStatus === "registered" ? "importComplete" : state.packagesJobStatus === "failed" ? "importFailed" : "importSubmitted");
         updateLogsUI();
         refreshPackagesCatalog();
       });
@@ -502,34 +494,32 @@ export function renderPackagesView() {
       const seedDraftBtn = el("button", "plain primary catalog-action-btn", {
         title: t("tipSeedSchemaFromPackage") || "Seed Schema draft from this package and proceed to editor",
         onclick: async () => {
-          let deckText = pkg.deck_file_content || state.packagesDeckText || SAMPLE_DECKS.solar;
+          const deckText = pkg.deck_file_content;
+          if (typeof deckText !== "string") {
+            parseMsg.className = "submit-msg err";
+            parseMsg.textContent = t("packageDeckUnavailable");
+            return;
+          }
           const parseRes = await postJSON("/api/packages/parse", { deck_text: deckText });
           if (!parseRes || !parseRes.ok || !parseRes.data) {
             parseMsg.className = "submit-msg err";
-            parseMsg.textContent = (parseRes && parseRes.data && parseRes.data.error) || t("netError") || "Network error";
+            showError(parseMsg, (parseRes && parseRes.data && parseRes.data.error) || t("netError") || "Network error");
             return;
           }
           const schemaDoc = buildSchemaDocFromParsed(parseRes.data);
-          schemaDoc.problem_hint = `problem:${pName.replace(/^pkg-/, "")}`;
+          schemaDoc.problem_hint = pName.replace(/^pkg-/, "");
           schemaDoc.source_package = { artifact_id: artId, revision: rev };
           state.schemaDraft.doc = schemaDoc;
           state.schemaDraft.rawJson = JSON.stringify(schemaDoc, null, 2);
           state.schemaDraft.registeredRevision = null;
+          state.schemaDraft.templateConfig = null;
+          state.schemaDraft.savedTemplate = null;
           state.schemaDraft.mode = "form";
           state.packagesPackageName = pName;
           navigate("#/compose?step=2");
         }
       }, t("btnSeedSchemaFromPackage") || "🌱 生成 Schema");
       actGroup.appendChild(seedDraftBtn);
-
-      // Prefill Problem
-      const probBtn = el("button", "plain catalog-action-btn", {
-        onclick: () => {
-          state.candidateDesigner.problemId = `problem:${pName.replace(/^pkg-/, "")}`;
-          navigate("#/compose?step=3");
-        }
-      }, "🎯 " + (t("submitCardProblem") || "注册 Problem"));
-      actGroup.appendChild(probBtn);
 
       tdAct.appendChild(actGroup);
       tr.appendChild(tdAct);

@@ -271,6 +271,39 @@ class StatusServerTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.middleware.get_study_status.assert_called_once_with("study:abc")
 
+    def test_template_options_do_not_load_solver_code(self) -> None:
+        entries = [
+            {"adapter_id": "alpha", "status": "active", "capabilities": ["solver-a"], "module": "private.module"},
+            {"adapter_id": "beta", "status": "experimental", "capabilities": ["solver-b"]},
+            {"adapter_id": "off", "status": "disabled", "capabilities": ["solver-a"]},
+        ]
+        with patch.object(status_server, "load_catalog", return_value=entries), \
+                patch("control_plane.simulation.adapter_catalog.resolve_adapter") as resolve:
+            status, _, payload = self._get("/api/template-options")
+        self.assertEqual(status, 200)
+        self.assertEqual([row["adapter_id"] for row in payload["adapters"]], ["alpha", "beta"])
+        self.assertTrue(all(row["selectable"] for row in payload["adapters"]))
+        self.assertNotIn("module", str(payload))
+        resolve.assert_not_called()
+
+    def test_template_options_flag_ambiguous_capabilities(self) -> None:
+        entries = [
+            {"adapter_id": "alpha", "status": "active", "capabilities": ["shared"]},
+            {"adapter_id": "beta", "status": "active", "capabilities": ["shared", "extra"]},
+        ]
+        with patch.object(status_server, "load_catalog", return_value=entries):
+            status, _, payload = self._get("/api/template-options")
+        self.assertEqual(status, 200)
+        self.assertEqual([row["selectable"] for row in payload["adapters"]], [False, True])
+
+    def test_template_detail_exists_before_first_study(self) -> None:
+        self.middleware.list_studies.return_value = []
+        self.middleware.list_problem_evaluations.return_value = []
+        status, _, payload = self._get("/api/problems/problem%3Ap1")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["problem"], {"problem_id": "problem:p1"})
+        self.assertEqual(payload["studies"], [])
+
     def test_unknown_problem_returns_404(self) -> None:
         self.middleware.list_studies.return_value = []
         self.middleware.list_problem_evaluations.return_value = []
@@ -538,7 +571,7 @@ class DemoModeTests(unittest.TestCase):
         schema_item = payload["items"][0]
         self.assertEqual(
             set(schema_item.keys()),
-            {"revision", "kind", "registered_at", "extract_names", "parameter_count"},
+            {"revision", "kind", "registered_at", "extract_names", "parameter_count", "problem_hint", "source_package"},
         )
         self.assertNotIn("canonical_json", schema_item)
         self.assertNotIn("schema", schema_item)
@@ -652,7 +685,7 @@ class RealRepositoryListEndpointsTests(unittest.TestCase):
         schema_item = payload["items"][0]
         self.assertEqual(
             set(schema_item.keys()),
-            {"revision", "kind", "registered_at", "extract_names", "parameter_count"},
+            {"revision", "kind", "registered_at", "extract_names", "parameter_count", "problem_hint", "source_package"},
         )
         self.assertEqual(schema_item["revision"], schema_rev)
         self.assertEqual(schema_item["kind"], "parameter-schema")

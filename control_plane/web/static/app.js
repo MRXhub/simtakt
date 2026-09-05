@@ -4,7 +4,9 @@
  */
 
 import { t, getLang, setLang, fmtClockTime } from "./i18n.js";
+import { entityName } from "./display.js";
 import { state } from "./state.js";
+import { initSidebar, updateSidebarLabels } from "./sidebar.js";
 import { fetchJSON, IS_MOCK } from "./api.js";
 import { parseRoute, updateDocTitle, markNav, navigate } from "./router.js";
 import { el, txt, emptyPanel, errorBlock, chip, getWriteModeText, getWriteModeTip, getHealthText } from "./ui.js";
@@ -41,6 +43,7 @@ async function prefetchEntityLists() {
         return {
           revision: s.revision || s.schema_revision || (typeof s === "string" ? s : ""),
           kind: s.kind || "parameter-schema",
+          problem_hint: s.problem_hint || "",
           parameter_count: pCount,
           parameters_count: pCount,
           registered_at: s.registered_at || null,
@@ -70,12 +73,14 @@ async function prefetchEntityLists() {
 }
 
 async function refreshHealth() {
-  const r = await fetchJSON("/api/health");
+  const r = await fetchJSON("/api/health").catch(() => null);
   const ok = !!(r && r.ok && r.data && r.data.status === "ok");
   state.healthOk = ok;
   state.health = (r && r.data) || null;
   state.writes = !!(ok && r.data && r.data.writes_enabled === true);
+  state.unreachable = !ok;
   updateTopBarHealth();
+  updateBanner();
 }
 
 export function updateTopBarHealth() {
@@ -163,8 +168,8 @@ export async function refreshRoute() {
 
     if (isStale()) return;
 
-    state.unreachable = false;
-    state.lastRenderAt = Date.now();
+    state.unreachable = !state.healthOk;
+    if (state.healthOk) state.lastRenderAt = Date.now();
     updateBanner();
 
     content.textContent = "";
@@ -186,6 +191,8 @@ export async function refreshRoute() {
 function updateNavLabelText(id, text) {
   const elNode = document.getElementById(id);
   if (!elNode) return;
+  elNode.setAttribute("aria-label", text);
+  elNode.title = text;
   const labelSpan = elNode.querySelector(".nav-label");
   if (labelSpan) {
     labelSpan.textContent = text;
@@ -216,6 +223,7 @@ export function updateStaticTexts() {
   // Primary Overview & Unified Workbench Navigation
   updateNavLabelText("nav-overview", t("navOverview"));
   updateNavLabelText("nav-compose", t("navCompose"));
+  updateNavLabelText("nav-templates", t("navTemplates"));
   const navCompose = document.getElementById("nav-compose");
   if (navCompose) {
     navCompose.title = t("navWorkbenchTip") || t("workbenchDesc");
@@ -278,6 +286,8 @@ export function updateStaticTexts() {
     mobileNavToggle.setAttribute("aria-label", t("mobileNavToggleAria") || "Toggle Navigation");
   }
 
+  updateSidebarLabels();
+
   // Always sync sidebar & mobile health and write-mode badge
   updateTopBarHealth();
 
@@ -296,7 +306,7 @@ export function updateStaticTexts() {
   if (mobileRouteTitle) {
     const routeTitles = {
       overview: t("navOverview"),
-      compose: t("navCompose"),
+      compose: t(currentRoute.step <= 3 ? "navTemplates" : "navCompose"),
       algorithms: t("navAlgorithms"),
       algorithm: t("navAlgorithms"),
       capacity: t("navCapacity"),
@@ -345,13 +355,20 @@ function renderHelpDrawer() {
   drawer.appendChild(wrap);
 }
 
+async function refreshAutomatic() {
+  await refreshHealth();
+  if (!state.healthOk) return;
+  const route = parseRoute();
+  // Preserve unsaved form inputs and previews during background refreshes.
+  if (route.name !== "compose" || route.id) await refreshRoute();
+}
+
 function startPollingTimer() {
   if (refreshTimer !== null) clearInterval(refreshTimer);
   const sec = parseInt(document.getElementById("interval")?.value || "10", 10) || 10;
   refreshTimer = setInterval(() => {
     if (!document.hidden) {
-      refreshHealth();
-      refreshRoute();
+      refreshAutomatic();
     }
   }, sec * 1000);
 }
@@ -363,6 +380,10 @@ function initSearchLookup() {
   function doLookup() {
     const v = input.value.trim();
     if (!v) return;
+    const study = state.studiesList.find(row => entityName(row.study_id, "study") === v);
+    const schema = state.schemasList.find(row => entityName(row.revision, "schema") === v);
+    if (study) { navigate(`#/study/${encodeURIComponent(study.study_id)}`); return; }
+    if (schema) { navigate(`#/schema/${encodeURIComponent(schema.revision)}`); return; }
     if (v.startsWith("run:") || v.startsWith("algorithm:") || v.startsWith("algo:")) {
       navigate(`#/algorithm/${encodeURIComponent(v)}`);
     } else if (v.startsWith("problem:")) {
@@ -416,10 +437,7 @@ function initEventListeners() {
   }
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
-      refreshHealth();
-      refreshRoute();
-    }
+    if (!document.hidden) refreshAutomatic();
   });
 
   const mockFailBtn = document.getElementById("mockfail");
@@ -434,110 +452,7 @@ function initEventListeners() {
     });
   }
 
-  // Mobile Drawer & Overlay Management
-  const mobileToggle = document.getElementById("mobileNavToggle");
-  const sidebar = document.getElementById("appSidebar");
-  const backdrop = document.getElementById("sidebarBackdrop");
-  let lastFocusedElement = null;
-
-  function closeMobileSidebar() {
-    if (sidebar) sidebar.classList.remove("open");
-    if (backdrop) {
-      backdrop.classList.remove("open");
-      backdrop.setAttribute("aria-hidden", "true");
-    }
-    if (typeof document !== "undefined" && document.body) {
-      document.body.classList.remove("drawer-open");
-    }
-    if (mobileToggle) {
-      mobileToggle.classList.remove("active");
-      mobileToggle.setAttribute("aria-expanded", "false");
-    }
-    if (lastFocusedElement && typeof lastFocusedElement.focus === "function") {
-      try { lastFocusedElement.focus(); } catch (_) {}
-    }
-  }
-
-  function openMobileSidebar() {
-    if (typeof document !== "undefined") {
-      lastFocusedElement = document.activeElement;
-    }
-    if (sidebar) sidebar.classList.add("open");
-    if (backdrop) {
-      backdrop.classList.add("open");
-      backdrop.setAttribute("aria-hidden", "false");
-    }
-    if (typeof document !== "undefined" && document.body) {
-      document.body.classList.add("drawer-open");
-    }
-    if (mobileToggle) {
-      mobileToggle.classList.add("active");
-      mobileToggle.setAttribute("aria-expanded", "true");
-    }
-    // Focus search input or active nav item inside drawer
-    setTimeout(() => {
-      const focusTarget = sidebar?.querySelector("input#lookup, a.nav-item.cur, a.nav-item");
-      if (focusTarget && typeof focusTarget.focus === "function") {
-        try { focusTarget.focus(); } catch (_) {}
-      }
-    }, 50);
-  }
-
-  function toggleMobileSidebar() {
-    const isOpen = sidebar?.classList.contains("open");
-    if (isOpen) {
-      closeMobileSidebar();
-    } else {
-      openMobileSidebar();
-    }
-  }
-
-  if (mobileToggle) {
-    mobileToggle.addEventListener("click", toggleMobileSidebar);
-  }
-
-  if (backdrop) {
-    backdrop.addEventListener("click", closeMobileSidebar);
-  }
-
-  // Keyboard navigation & Esc key handling for drawer
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && sidebar?.classList.contains("open")) {
-      closeMobileSidebar();
-    }
-  });
-
-  // Focus trapping within open drawer
-  if (sidebar) {
-    sidebar.addEventListener("keydown", (e) => {
-      if (!sidebar.classList.contains("open")) return;
-      if (e.key === "Tab") {
-        const focusable = sidebar.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])');
-        if (focusable.length === 0) return;
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (e.shiftKey && document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
-      }
-    });
-  }
-
-  // Close sidebar on link click when in mobile drawer mode
-  if (sidebar) {
-    const navAnchors = sidebar.querySelectorAll("a.nav-item, a.brand");
-    navAnchors.forEach(a => {
-      a.addEventListener("click", () => {
-        if (window.innerWidth <= 880) {
-          closeMobileSidebar();
-        }
-      });
-    });
-  }
+  initSidebar();
 
   initSearchLookup();
 }

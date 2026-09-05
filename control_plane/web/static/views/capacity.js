@@ -76,7 +76,7 @@ export async function renderCapacityView() {
       val: recoveringCount,
       dotTone: recoveringCount > 0 ? "bad" : null,
       tone: recoveringCount > 0 ? "bad" : "neutral",
-      tipKey: "tipStaleReconciling",
+      tipKey: "tipRecovering",
       sub: recoveringSub
     },
     {
@@ -84,7 +84,7 @@ export async function renderCapacityView() {
       val: reconcilingCount,
       dotTone: reconcilingCount > 0 ? "warn" : null,
       tone: reconcilingCount > 0 ? "warn" : "neutral",
-      tipKey: "tipStaleReconciling",
+      tipKey: "tipReconciling",
       sub: reconcilingSub
     }
   ];
@@ -139,7 +139,8 @@ export async function renderCapacityView() {
       tr.appendChild(el("td", "mono", txt(`${active} / ${total}`)));
       tr.appendChild(el("td", "mono num", txt(pool.license_sessions_in_use !== null && pool.license_sessions_in_use !== undefined ? String(pool.license_sessions_in_use) : "—")));
       tr.appendChild(el("td", "mono num", txt(pool.license_reserve !== undefined ? String(pool.license_reserve) : "—")));
-      tr.appendChild(el("td", "", chip(pool.active ? "ok" : "dim", pool.active ? (t("chipActive") || "启用") : (t("chipDisabled") || "停用"))));
+      const enabled = typeof pool.active === "boolean" ? pool.active : null;
+      tr.appendChild(el("td", "", chip(enabled === true ? "ok" : "dim", enabled === null ? "—" : enabled ? t("chipActive") : t("chipDisabled"))));
       pTbody.appendChild(tr);
     });
     pTable.appendChild(pTbody);
@@ -179,12 +180,13 @@ export async function renderCapacityView() {
       const tr = el("tr");
       tr.appendChild(el("td", "mono", { style: "font-weight: 600;" }, monoHash(target.target_id, { len: 20 })));
       tr.appendChild(el("td", "mono dim", target.host_id ? monoHash(target.host_id, { len: 16 }) : txt("—")));
-      tr.appendChild(el("td", "", chip("info", target.role || "formal")));
+      tr.appendChild(el("td", "", chip("info", t(target.role === "formal" ? "nodeRoleFormal" : target.role === "trial" ? "nodeRoleTrial" : "nodeRoleUnknown"))));
 
       const act = target.active_count !== undefined ? target.active_count : 0;
       const max = target.max_active_sessions !== null && target.max_active_sessions !== undefined ? target.max_active_sessions : "—";
       tr.appendChild(el("td", "mono", txt(`${act} / ${max}`)));
-      tr.appendChild(el("td", "", chip(target.active ? "ok" : "dim", target.active ? (t("chipActive") || "启用") : (t("chipDisabled") || "停用"))));
+      const enabled = typeof target.active === "boolean" ? target.active : null;
+      tr.appendChild(el("td", "", chip(enabled === true ? "ok" : "dim", enabled === null ? "—" : enabled ? t("chipActive") : t("chipDisabled"))));
       tTbody.appendChild(tr);
     });
     tTable.appendChild(tTbody);

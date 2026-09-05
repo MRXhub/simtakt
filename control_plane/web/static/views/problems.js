@@ -10,8 +10,9 @@
  */
 
 import { t } from "../i18n.js";
+import { entityName } from "../display.js";
 import { state } from "../state.js";
-import { el, txt, pageHead, emptyPanel, errorBlock, chip, statusPill, monoHash } from "../ui.js";
+import { el, txt, pageHead, emptyPanel, errorBlock, chip, statusPill, monoHash, statusName } from "../ui.js";
 import { fetchJSON } from "../api.js";
 import { navigate } from "../router.js";
 
@@ -79,7 +80,7 @@ export async function renderProblemsView({ id, isEmbedded = false } = {}) {
       href: `#/problem/${encodeURIComponent(pid)}`,
       title: pid,
       style: "font-weight: 600;"
-    }, txt(pid));
+    }, txt(entityName(pid, "problem")));
     tdId.appendChild(aId);
     tr.appendChild(tdId);
 
@@ -87,8 +88,8 @@ export async function renderProblemsView({ id, isEmbedded = false } = {}) {
     if (sRev && sRev !== "—") {
       const aSchema = el("a", "mono", {
         href: `#/schema/${encodeURIComponent(sRev)}`,
-        title: sRev
-      }, monoHash(sRev, { len: 14 }));
+        title: t("viewSchemaDetail")
+      }, txt(entityName(sRev, "schema")));
       tdSchema.appendChild(aSchema);
     } else {
       tdSchema.appendChild(el("span", "dim", "—"));
@@ -151,7 +152,7 @@ export async function renderProblemsView({ id, isEmbedded = false } = {}) {
  * Problem Detail View (Flat rule-delimited layout without generic panel-card wrappers)
  */
 async function renderProblemDetail(pid, container) {
-  const head = pageHead(t("problemTitle", { id: pid }), t("problemDesc"), [
+  const head = pageHead(entityName(pid, "problem"), t("problemDesc"), [
     el("button", "plain", { onclick: () => navigate("#/compose?step=3") }, "⬅️ " + t("btnBackToList")),
     el("button", "plain", {
       onclick: () => {
@@ -184,14 +185,14 @@ async function renderProblemDetail(pid, container) {
 
   const rId = el("div", "detail-kv-item");
   rId.appendChild(el("span", "kv-key", txt(t("fieldProblemId"))));
-  rId.appendChild(el("span", "kv-val mono", txt(pid)));
+  rId.appendChild(el("span", "kv-val mono", txt(entityName(pid, "problem"))));
   metaGrid.appendChild(rId);
 
   const sRev = pData.parameter_schema_revision || (pData.problem && pData.problem.parameter_schema_revision);
   const rSchema = el("div", "detail-kv-item");
   rSchema.appendChild(el("span", "kv-key", txt(t("fieldParamSchemaRev"))));
   if (sRev) {
-    const aRev = el("a", "mono", { href: `#/schema/${encodeURIComponent(sRev)}` }, monoHash(sRev, { len: 20 }));
+    const aRev = el("a", "mono", { href: `#/schema/${encodeURIComponent(sRev)}` }, txt(entityName(sRev, "schema")));
     rSchema.appendChild(aRev);
   } else {
     rSchema.appendChild(el("span", "dim", "—"));
@@ -200,7 +201,7 @@ async function renderProblemDetail(pid, container) {
 
   const rConst = el("div", "detail-kv-item");
   rConst.appendChild(el("span", "kv-key", txt(t("metaConstraint"))));
-  rConst.appendChild(el("span", "kv-val mono", txt(pData.constraint_revision || "none")));
+  rConst.appendChild(el("span", "kv-val mono", monoHash(pData.problem?.constraint_revision || pData.constraint_revision)));
   metaGrid.appendChild(rConst);
 
   const rMetric = el("div", "detail-kv-item");
@@ -240,7 +241,7 @@ async function renderProblemDetail(pid, container) {
       tdSid.appendChild(el("a", "mono mono-study-id", {
         href: `#/study/${encodeURIComponent(s.study_id)}`,
         style: "font-weight: 600;"
-      }, txt(s.study_id)));
+      }, txt(entityName(s.study_id, "study"))));
       tr.appendChild(tdSid);
 
       tr.appendChild(el("td", "mono sub", monoHash(s.problem_revision, { len: 12 })));
@@ -256,7 +257,7 @@ async function renderProblemDetail(pid, container) {
       }
       tr.appendChild(tdRun);
 
-      tr.appendChild(el("td", "", chip("info", s.automation_profile || "standard")));
+      tr.appendChild(el("td", "", chip("info", t("profile_" + (s.automation_profile || "standard")))));
 
       const tdAct = el("td", "num");
       const btn = el("button", "plain primary", {
@@ -303,7 +304,7 @@ async function renderProblemDetail(pid, container) {
     evals.forEach(ev => {
       const tr = el("tr");
       const tdId = el("td");
-      tdId.appendChild(el("div", "mono mono-eval-id", { style: "font-weight: 600;", title: ev.evaluation_id }, txt(ev.evaluation_id)));
+      tdId.appendChild(el("div", "mono mono-eval-id", { style: "font-weight: 600;", title: ev.evaluation_id }, monoHash(ev.evaluation_id)));
       if (ev.candidate_id) {
         tdId.appendChild(el("div", "sub dim", monoHash(ev.candidate_id, { len: 16, prefix: "cand: " })));
       }
@@ -311,7 +312,7 @@ async function renderProblemDetail(pid, container) {
 
       tr.appendChild(el("td", "", statusPill(ev.status)));
       tr.appendChild(el("td", "num mono", txt(ev.fidelity !== undefined ? ev.fidelity : "—")));
-      tr.appendChild(el("td", "mono", txt(ev.priority !== undefined ? ev.priority : "—")));
+      tr.appendChild(el("td", "mono", txt(t("priority_" + (ev.priority || "normal")))));
       eTbody.appendChild(tr);
     });
     eTable.appendChild(eTbody);

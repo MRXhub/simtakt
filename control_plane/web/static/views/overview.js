@@ -4,8 +4,9 @@
  */
 
 import { t, fmtRelativeTime, fmtDate, fmtClockTime } from "../i18n.js";
+import { entityName } from "../display.js";
 import { state } from "../state.js";
-import { el, txt, pageHead, emptyPanel, metricRail, chip, tip, monoHash, renderModeBadge, renderHealthIndicator } from "../ui.js";
+import { el, txt, pageHead, emptyPanel, metricRail, chip, tip, monoHash, renderModeBadge, renderHealthIndicator, statusName } from "../ui.js";
 import { fetchJSON } from "../api.js";
 import { navigate } from "../router.js";
 
@@ -78,7 +79,7 @@ export async function renderOverviewView() {
       val: recoveringCount,
       dotTone: recoveringCount > 0 ? "bad" : null,
       tone: recoveringCount > 0 ? "bad" : "neutral",
-      tipKey: "tipStaleReconciling",
+      tipKey: "tipRecovering",
       sub: recoveringSub
     },
     {
@@ -86,7 +87,7 @@ export async function renderOverviewView() {
       val: reconcilingCount,
       dotTone: reconcilingCount > 0 ? "warn" : null,
       tone: reconcilingCount > 0 ? "warn" : "neutral",
-      tipKey: "tipStaleReconciling",
+      tipKey: "tipReconciling",
       sub: reconcilingSub
     }
   ];
@@ -218,7 +219,7 @@ export async function renderOverviewView() {
       if (!textFilter) return true;
       const sid = (s.study_id || "").toLowerCase();
       const pid = (s.problem_id || "").toLowerCase();
-      return sid.includes(textFilter) || pid.includes(textFilter);
+      return [sid, pid, entityName(s.study_id, "study"), entityName(s.problem_id, "problem")].some(value => value.toLowerCase().includes(textFilter));
     });
 
     countSummary.textContent = t("studyCountSummary", { shown: filtered.length, total: studies.length });
@@ -255,7 +256,7 @@ export async function renderOverviewView() {
       const sidLink = el("a", "mono mono-study-id", {
         href: `#/study/${encodeURIComponent(s.study_id)}`,
         title: s.study_id
-      }, txt(s.study_id));
+      }, txt(entityName(s.study_id, "study")));
       tdSid.appendChild(sidLink);
       tr.appendChild(tdSid);
 
@@ -265,7 +266,7 @@ export async function renderOverviewView() {
         tdPid.appendChild(el("a", "mono mono-problem-id", {
           href: `#/problem/${encodeURIComponent(s.problem_id)}`,
           title: s.problem_id
-        }, txt(s.problem_id)));
+        }, txt(entityName(s.problem_id, "problem"))));
         if (s.problem_revision !== undefined && s.problem_revision !== null && s.problem_revision !== "") {
           const revSpan = monoHash(s.problem_revision, { len: 12, prefix: " @ " });
           tdPid.appendChild(revSpan);
@@ -290,7 +291,7 @@ export async function renderOverviewView() {
           else if (st === "queued" || st === "recovering" || st === "reconciling") tone = "warn";
           else if (st === "failed" || st === "unresolved") tone = "bad";
           else if (st === "cancelled") tone = "dim";
-          chipsWrap.appendChild(chip(tone, `${st}: ${counts[st]}`));
+          chipsWrap.appendChild(chip(tone, `${statusName(st)}: ${counts[st]}`));
         }
       });
       if (chipsWrap.children.length === 0) chipsWrap.appendChild(el("span", "dim sub", txt(t("noEvals") || "无评测")));
