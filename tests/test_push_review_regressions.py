@@ -235,6 +235,32 @@ class PushReviewRegressions(unittest.TestCase):
         self.assertEqual(registered.read_bytes(), b"set x = 1\n")
         self.assertTrue(any("changed during import" in line for line in job["log_tail"]), job["log_tail"])
 
+    def test_inbox_folder_returns_when_copy_fails(self):
+        service = self.service()
+        self.inbox_folder(service, "review-package", {"deck.in": b"set x = 1\n", "mesh.bin": b"\x00"})
+        with mock.patch("control_plane.web.package_landing.shutil.copyfile", side_effect=OSError("disk full")):
+            job = service.wait_job(service.import_inbox({"directory": "review-package"})["job_id"])
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("disk full", job["error"])
+        self.assertEqual(sorted(p.name for p in service.inbox_dir.iterdir()), ["review-package"])
+        [item] = service.list_inbox()["items"]
+        self.assertEqual(item["job"]["status"], "failed")
+
+    def test_inbox_folder_returns_when_changed_during_copy(self):
+        service = self.service()
+        self.inbox_folder(service, "review-package", {"deck.in": b"set x = 1\n"})
+        real_copy = shutil.copyfile
+        def copy_then_touch(src, dst):
+            real_copy(src, dst)
+            Path(src).with_name("late.bin").write_bytes(b"late")
+        with mock.patch("control_plane.web.package_landing.shutil.copyfile", side_effect=copy_then_touch):
+            job = service.wait_job(service.import_inbox({"directory": "review-package"})["job_id"])
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("changed while it was copied", job["error"])
+        restored = service.inbox_dir / "review-package"
+        self.assertEqual(sorted(p.name for p in restored.iterdir()), ["deck.in", "late.bin"])
+        self.assertEqual(list(service.packages_dir.iterdir()), [])
+
     def test_interrupted_inbox_handoff_is_restored_on_startup(self):
         inbox = self.root / "data/inputs/inbox"
         handed_off = inbox / ".importing.0123abcd.review-package"

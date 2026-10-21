@@ -726,16 +726,22 @@ class PackageLandingService:
             raise PackageLandingError(
                 f"inbox folder '{name}' is in use and cannot be imported yet ({exc.strerror or exc})"
             ) from exc
-        snapshot = self._snapshot_folder(handed_off)
-        scan = self._scan_inbox_folder(handed_off, name)
-        if scan["issues"]:
-            raise PackageLandingError("; ".join(scan["issues"]))
-        if deck_file not in {row["name"] for row in scan["files"]}:
-            raise PackageLandingError(f"deck_file '{deck_file}' is no longer in inbox folder '{name}'")
-        for row in scan["files"]:
-            shutil.copyfile(handed_off / row["name"], staging_dir / row["name"])
-        if self._snapshot_folder(handed_off) != snapshot:
-            raise PackageLandingError(f"inbox folder '{name}' changed while it was copied; import it again")
+        # The caller only learns the handed-off path on return, so any failure
+        # from here on must put the folder back before propagating.
+        try:
+            snapshot = self._snapshot_folder(handed_off)
+            scan = self._scan_inbox_folder(handed_off, name)
+            if scan["issues"]:
+                raise PackageLandingError("; ".join(scan["issues"]))
+            if deck_file not in {row["name"] for row in scan["files"]}:
+                raise PackageLandingError(f"deck_file '{deck_file}' is no longer in inbox folder '{name}'")
+            for row in scan["files"]:
+                shutil.copyfile(handed_off / row["name"], staging_dir / row["name"])
+            if self._snapshot_folder(handed_off) != snapshot:
+                raise PackageLandingError(f"inbox folder '{name}' changed while it was copied; import it again")
+        except BaseException:
+            self._settle_inbox_folder(job, handed_off, {}, imported=False)
+            raise
         return handed_off, snapshot
 
     @staticmethod
