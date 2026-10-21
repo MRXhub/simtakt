@@ -471,7 +471,10 @@ export function renderPackagesView() {
       const artId = pkg.artifact_id || `pkg.${pName}`;
       const rev = pkg.revision || "sha256:registered";
       const status = pkg.status || "registered";
-      const isExpanded = !!state.expandedPackageManifests[pName];
+      // One package can list several rows (registered plus unclaimed
+      // revision directories), so the expanded state follows the directory.
+      const rowKey = pkg.path || pName;
+      const isExpanded = !!state.expandedPackageManifests[rowKey];
 
       const tr = el("tr");
       tr.appendChild(el("td", "mono mono-pkg-name", txt(pName)));
@@ -489,7 +492,7 @@ export function renderPackagesView() {
       // View Manifest & Files Button
       const manifestBtn = el("button", `plain catalog-action-btn ${isExpanded ? "active" : ""}`, {
         onclick: () => {
-          state.expandedPackageManifests[pName] = !state.expandedPackageManifests[pName];
+          state.expandedPackageManifests[rowKey] = !state.expandedPackageManifests[rowKey];
           buildTable(state.packagesList);
         }
       }, isExpanded ? (t("btnCollapseManifest") || "▲ 收起文件") : (t("btnViewManifest") || "📄 查看文件"));
@@ -516,42 +519,38 @@ export function renderPackagesView() {
         } else {
           actGroup.appendChild(el("span", "sub dim", txt(t("tipClaimPackage"))));
         }
-        tdAct.appendChild(actGroup);
-        tr.appendChild(tdAct);
-        tbody.appendChild(tr);
-        return;
+      } else {
+        // Seed Schema Draft Button
+        const seedDraftBtn = el("button", "plain primary catalog-action-btn", {
+          title: t("tipSeedSchemaFromPackage") || "Seed Schema draft from this package and proceed to editor",
+          onclick: async () => {
+            const deckText = pkg.deck_file_content;
+            if (typeof deckText !== "string") {
+              parseMsg.className = "submit-msg err";
+              parseMsg.textContent = t("packageDeckUnavailable");
+              return;
+            }
+            const parseRes = await postJSON("/api/packages/parse", { deck_text: deckText });
+            if (!parseRes || !parseRes.ok || !parseRes.data) {
+              parseMsg.className = "submit-msg err";
+              showError(parseMsg, (parseRes && parseRes.data && parseRes.data.error) || t("netError") || "Network error");
+              return;
+            }
+            const schemaDoc = buildSchemaDocFromParsed(parseRes.data);
+            schemaDoc.problem_hint = pName.replace(/^pkg-/, "");
+            schemaDoc.source_package = { artifact_id: artId, revision: rev };
+            state.schemaDraft.doc = schemaDoc;
+            state.schemaDraft.rawJson = JSON.stringify(schemaDoc, null, 2);
+            state.schemaDraft.registeredRevision = null;
+            state.schemaDraft.templateConfig = null;
+            state.schemaDraft.savedTemplate = null;
+            state.schemaDraft.mode = "form";
+            state.packagesPackageName = pName;
+            navigate("#/compose?step=2");
+          }
+        }, t("btnSeedSchemaFromPackage") || "🌱 生成 Schema");
+        actGroup.appendChild(seedDraftBtn);
       }
-
-      // Seed Schema Draft Button
-      const seedDraftBtn = el("button", "plain primary catalog-action-btn", {
-        title: t("tipSeedSchemaFromPackage") || "Seed Schema draft from this package and proceed to editor",
-        onclick: async () => {
-          const deckText = pkg.deck_file_content;
-          if (typeof deckText !== "string") {
-            parseMsg.className = "submit-msg err";
-            parseMsg.textContent = t("packageDeckUnavailable");
-            return;
-          }
-          const parseRes = await postJSON("/api/packages/parse", { deck_text: deckText });
-          if (!parseRes || !parseRes.ok || !parseRes.data) {
-            parseMsg.className = "submit-msg err";
-            showError(parseMsg, (parseRes && parseRes.data && parseRes.data.error) || t("netError") || "Network error");
-            return;
-          }
-          const schemaDoc = buildSchemaDocFromParsed(parseRes.data);
-          schemaDoc.problem_hint = pName.replace(/^pkg-/, "");
-          schemaDoc.source_package = { artifact_id: artId, revision: rev };
-          state.schemaDraft.doc = schemaDoc;
-          state.schemaDraft.rawJson = JSON.stringify(schemaDoc, null, 2);
-          state.schemaDraft.registeredRevision = null;
-          state.schemaDraft.templateConfig = null;
-          state.schemaDraft.savedTemplate = null;
-          state.schemaDraft.mode = "form";
-          state.packagesPackageName = pName;
-          navigate("#/compose?step=2");
-        }
-      }, t("btnSeedSchemaFromPackage") || "🌱 生成 Schema");
-      actGroup.appendChild(seedDraftBtn);
 
       tdAct.appendChild(actGroup);
       tr.appendChild(tdAct);

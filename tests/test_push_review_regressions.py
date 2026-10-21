@@ -111,6 +111,22 @@ class PushReviewRegressions(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "does not match"):
             service.claim_package("other-package")
 
+    def test_claim_rejects_manifest_with_other_artifact_identity(self):
+        service = self.service()
+        _, job = self.legacy_package(service)
+        manifest_path = self.root / job["package"]["path"] / "manifest.json"
+        original = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for artifact_id in ("pkg:review-package", None):
+            manifest = dict(original)
+            if artifact_id is None:
+                manifest.pop("artifact_id")
+            else:
+                manifest["artifact_id"] = artifact_id
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.subTest(artifact_id=artifact_id), self.assertRaisesRegex(ContractError, "artifact_id"):
+                service.claim_package("review-package")
+        self.assertFalse((self.root / "records/artifacts/pkg.review-package.json").exists())
+
     def test_changed_auxiliary_file_is_not_deduplicated(self):
         service = self.service()
         _, first = self.land(service, files={"material.txt": "old"})

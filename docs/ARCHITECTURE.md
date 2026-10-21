@@ -131,7 +131,9 @@ build, an interrupted landing, or copied in by hand) is listed with status
 `unclaimed` and is not treated as registered. `POST /api/packages/claim`
 with `{"directory": "<name>"}` or `{"directory": "<name>__<suffix>"}` validates
 the manifest and file hashes with the landing validator, checks that the
-manifest names the same package, and adds the manifest hash as a revision. Files
+manifest names the same package and carries `artifact_id: "pkg.<name>"`
+(preparation rejects a manifest whose identity differs from the shard), and
+adds the manifest hash as a revision. Files
 are never moved or rewritten. Claiming does not replace an existing
 `latest_revision`; it returns 409 when the same revision is already registered
 at another directory. After claiming, resubmitting identical content reuses

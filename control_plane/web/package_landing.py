@@ -526,6 +526,12 @@ class PackageLandingService:
             raise ContractError(
                 f"manifest package_name '{manifest.get('package_name')}' does not match directory '{name}'"
             )
+        # Preparation rejects a package whose manifest names another artifact,
+        # so a claimed revision must already carry the registered identity.
+        if manifest.get("artifact_id") != f"pkg.{package_name}":
+            raise ContractError(
+                f"manifest artifact_id '{manifest.get('artifact_id')}' must be 'pkg.{package_name}' to be claimed"
+            )
 
         manifest_hash, recorded_path = self._record_revision(package_name, package_dir, make_latest=False)
         if recorded_path is not None and recorded_path != package_dir:
