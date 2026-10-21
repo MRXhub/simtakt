@@ -99,6 +99,7 @@ class EvaluationMiddleware:
             return []
         root = Path(self._project_root).resolve()
         packages: dict[str, dict[str, Any]] = {}
+        claimed_paths: set[str] = set()
 
         # 1. Scan records/artifacts shards for active input-package records
         artifacts_dir = root / "records" / "artifacts"
@@ -117,6 +118,13 @@ class EvaluationMiddleware:
                         art_id = str(art.get("artifact_id", ""))
                         if not art_id:
                             continue
+                        for rev_entry in art.get("revisions", []):
+                            for loc in rev_entry.get("locations", []) if isinstance(rev_entry, dict) else []:
+                                if isinstance(loc, dict) and loc.get("path"):
+                                    try:
+                                        claimed_paths.add(str((root / str(loc["path"])).resolve().relative_to(root)).replace("\\", "/"))
+                                    except (ValueError, RuntimeError, OSError):
+                                        pass
                         latest_rev = str(art.get("latest_revision", ""))
                         primary_path = None
                         for rev_entry in art.get("revisions", []):
@@ -170,7 +178,8 @@ class EvaluationMiddleware:
             except OSError:
                 pass
 
-        # 2. Scan data/inputs/packages directory for landed packages
+        # 2. Directories no shard references are listed as unclaimed, one row
+        # each, so they can be claimed instead of passing as registered.
         pkg_root = root / "data" / "inputs" / "packages"
         if pkg_root.is_dir():
             try:
@@ -182,6 +191,8 @@ class EvaluationMiddleware:
                         rel_path = str(resolved_entry.relative_to(root)).replace("\\", "/")
                     except (ValueError, RuntimeError):
                         continue
+                    if rel_path in claimed_paths:
+                        continue
 
                     manifest_file = resolved_entry / "manifest.json"
                     if not manifest_file.is_file():
@@ -191,23 +202,22 @@ class EvaluationMiddleware:
                         if not isinstance(m, dict):
                             continue
                         pkg_name = m.get("package_name", entry.name)
-                        art_id = m.get("artifact_id", f"pkg:{pkg_name}")
-                        if art_id in packages:
-                            continue
+                        art_id = m.get("artifact_id", f"pkg.{pkg_name}")
                         deck_file = m.get("deck_file", "deck.in")
                         rev = "sha256:" + hashlib.sha256(manifest_file.read_bytes()).hexdigest().lower()
                         pkg_item = {
                             "package_name": pkg_name,
                             "artifact_id": art_id,
                             "revision": rev,
-                            "status": "registered",
+                            "status": "unclaimed",
+                            "directory": entry.name,
                             "path": rel_path,
                             "deck_file": deck_file,
                             "created_at": m.get("created_at"),
                             "dependencies": m.get("dependencies", []),
                             "files": m.get("files", []),
                         }
-                        packages[art_id] = pkg_item
+                        packages[f"unclaimed:{rel_path}"] = pkg_item
                     except Exception:
                         continue
             except OSError:

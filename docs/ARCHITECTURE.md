@@ -122,6 +122,57 @@ as an artifact. The auditable input baseline is the input-package artifact
 referenced by the ParameterSchema `source_package` at an exact revision, which
 preparation validated and bound into the immutable preparation.
 
+### Importing folders from the inbox
+
+The JSON upload (`POST /api/packages`) carries text files within the request
+body limit. Large or binary packages go through the inbox instead: copy a
+folder of plain files to `data/inputs/inbox/<name>/`, where the folder name is
+the package name. `GET /api/packages/inbox` lists each folder with its files, a
+suggested deck file, and anything that blocks import (an invalid name,
+subdirectories, symlinks, unsafe file names, or no files). Dotfiles,
+`Thumbs.db`, and `desktop.ini` are skipped.
+
+`POST /api/packages/inbox/import` with `{"directory": "<name>"}` and an
+optional `deck_file` and `dependencies` queues an ordinary landing job. The
+deck is inferred when the folder has one file, exactly one `deck.*` file, or
+an existing `manifest.json` naming a deck; otherwise `deck_file` is required.
+The worker copies the files into staging, generates a fresh manifest
+(`artifact_id: "pkg.<name>"`), validates it, and registers the revision as the
+latest one, exactly like an upload. Any `manifest.json` in the folder only
+supplies defaults and is never copied, so legacy manifests import cleanly:
+before registration nothing refers to their hash. Importing files identical to
+a registered revision reuses that revision.
+
+The worker first renames the folder to `.importing.<job>.<name>` inside the
+inbox, so files written to `inbox/<name>` afterwards start a new folder rather
+than joining an import already under way; a folder still in use cannot be
+renamed on Windows and the job fails with the folder left in place. The worker
+records each entry's kind, size, and modification time before copying and
+fails the job if they change during the copy. After registration the
+handed-off folder is deleted only if it still matches that record; otherwise,
+and whenever landing fails, it is renamed back to `inbox/<name>`, or to
+`<name>.kept-<job>` when a new folder has taken that name. Startup returns
+handed-off folders left by an interrupted import the same way. A failure shows
+on the folder's listing entry.
+
+### Claiming existing package directories
+
+An input package is registered when its artifact shard
+(`records/artifacts/pkg.<name>.json`) lists the directory as a revision. A
+directory under `data/inputs/packages/` without such a record (left by an older
+build, an interrupted landing, or copied in by hand) is listed with status
+`unclaimed` and is not treated as registered. `POST /api/packages/claim`
+with `{"directory": "<name>"}` or `{"directory": "<name>__<suffix>"}` validates
+the manifest and file hashes with the landing validator, checks that the
+manifest names the same package and carries `artifact_id: "pkg.<name>"`
+(preparation rejects a manifest whose identity differs from the shard), and
+adds the manifest hash as a revision. A directory whose manifest fails these
+checks is imported through the inbox instead. Files
+are never moved or rewritten. Claiming does not replace an existing
+`latest_revision`; it returns 409 when the same revision is already registered
+at another directory. After claiming, resubmitting identical content reuses
+the claimed directory.
+
 ## Failure and duration semantics
 
 - Session failure classes `unreachable` and `indeterminate` are distinct from
@@ -130,7 +181,12 @@ preparation validated and bound into the immutable preparation.
   (`service.auto_release_wall_budget` / `dispatcher.recover_once`); a pending
   session is only confirmed terminated when the worker returns `terminated` or
   `absent`, and a monitor/worker without `terminate_session` reports
-  termination as unconfirmed.
+  termination as unconfirmed. An Attempt bound without an allocation (the
+  manual AI/CLI path) cannot be resumed; for a worker that implements
+  `resume_session`, the dispatcher then calls `terminate_session` with the
+  `session_ref` alone. Without the restored binding `absent` proves nothing, so
+  only `terminated` confirms; any other result marks the termination
+  `unavailable` and removes it from the queue instead of retrying it at the head.
 - Workers can include `wall_seconds` / `cpu_seconds` / `peak_rss_bytes` in
   `SolverRunRecord` bodies. When completion feedback is explicitly supplied,
   missing feedback fields are derived by summing wall/CPU durations and taking

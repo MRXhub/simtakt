@@ -129,12 +129,12 @@ class SessionLifecycleDispatcher:
                 if not callable(fn):
                     self.middleware.update_termination_state(attempt_id, "unavailable", now=now)
                     termination_result = {"attempt_id": attempt_id, "session_ref": session_ref, "termination": "unavailable"}
+                elif self._lacks_reconstruction_data(pending):
+                    termination_result = self._terminate_unbound(attempt_id, session_ref, fn, now)
                 else:
                     try:
                         resume = getattr(self.worker, "resume_session", None)
                         if callable(resume):
-                            if pending.get("execution_plan") is None or pending.get("allocation") is None:
-                                raise DispatchError("pending termination lacks worker reconstruction data")
                             resume(pending["execution_plan"], pending["allocation"], session_ref)
                         raw_outcome = fn(session_ref)
                     except Exception as exc:
@@ -394,6 +394,37 @@ class SessionLifecycleDispatcher:
             return True
         # unobservable -> leave the orphan open for a later round.
         return False
+
+    def _lacks_reconstruction_data(self, pending: Mapping[str, Any]) -> bool:
+        """True when the worker needs a resumed binding the Attempt cannot provide."""
+        if not callable(getattr(self.worker, "resume_session", None)):
+            return False
+        return pending.get("execution_plan") is None or pending.get("allocation") is None
+
+    def _terminate_unbound(
+        self, attempt_id: str, session_ref: str, fn: Callable[[str], Any], now: datetime | None
+    ) -> dict[str, Any]:
+        """Terminate by session_ref alone; anything short of proof leaves the queue.
+
+        Attempts bound without an allocation (the manual AI/CLI path) cannot be
+        resumed. Without the binding, "absent" only means the worker does not
+        know the ref, so only "terminated" confirms. Every other result marks the
+        termination unavailable so it stops blocking the head of the queue.
+        """
+        result: dict[str, Any] = {"attempt_id": attempt_id, "session_ref": session_ref, "unbound": True}
+        try:
+            outcome = normalize_session_termination(fn(session_ref))
+        except Exception as exc:
+            result["error"] = {"kind": "adapter_exception", "type": type(exc).__name__, "message": str(exc)}
+        else:
+            result["outcome"] = outcome
+            if outcome == "terminated":
+                self.middleware.update_termination_state(attempt_id, "confirmed", now=now)
+                result["termination"] = "confirmed"
+                return result
+        self.middleware.update_termination_state(attempt_id, "unavailable", now=now)
+        result["termination"] = "unavailable"
+        return result
 
     def _observe_orphan(self, orphan: Mapping[str, Any]) -> str | None:
         get_attempt = getattr(self.middleware, "get_attempt", None)

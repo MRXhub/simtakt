@@ -9,7 +9,7 @@
  * - Dense technical tables with truncated hashes and tabular numerals
  */
 
-import { t, fmtClockTime, fmtDate } from "../i18n.js";
+import { t, fmtClockTime, fmtDate, fmtBytes } from "../i18n.js";
 import { state } from "../state.js";
 import { el, txt, pageHead, emptyPanel, chip, monoHash, technicalDetails, showError } from "../ui.js";
 import { postJSON, fetchJSON, SAMPLE_DECKS } from "../api.js";
@@ -433,11 +433,143 @@ export function renderPackagesView() {
     landingContainer.appendChild(landSection);
   }
 
+  // ================= Section 3b: Inbox Folder Import =================
+  // Large or binary models are copied into the project's inbox folder by
+  // hand; importing a folder generates its manifest and registers it like an
+  // upload. A read-only server has no landing service, so the section hides.
+  const inboxSection = el("section", "rule-section packages-inbox-section");
+  inboxSection.hidden = true;
+  inboxSection.appendChild(el("h3", "section-heading", txt(t("packageInboxSectionTitle"))));
+  const inboxHint = el("div", "form-help dim");
+  inboxSection.appendChild(inboxHint);
+  const inboxMsg = el("div", "submit-msg");
+  inboxSection.appendChild(inboxMsg);
+  const inboxListWrap = el("div", "packages-inbox-wrap");
+  inboxSection.appendChild(inboxListWrap);
+  container.appendChild(inboxSection);
+
+  const ACTIVE_INBOX_JOB = new Set(["queued", "staging", "verifying", "registering"]);
+
+  function renderInbox(data) {
+    inboxHint.textContent = t("packageInboxHint", { path: data.path });
+    inboxListWrap.textContent = "";
+    const items = data.items || [];
+    if (!items.length) {
+      inboxListWrap.appendChild(el("div", "sub dim", txt(t("packageInboxEmpty"))));
+      return;
+    }
+    const table = el("table", "data-table table-dense");
+    const trH = el("tr");
+    for (const key of ["packageInboxFolder", "packageInboxFiles", "packageInboxDeck", "thStatus", "thActions"]) {
+      trH.appendChild(el("th", "", txt(t(key))));
+    }
+    table.appendChild(el("thead", "", trH));
+    const tbody = el("tbody");
+
+    for (const item of items) {
+      const tr = el("tr");
+      tr.appendChild(el("td", "mono", txt(item.directory)));
+      const totalBytes = item.files.reduce((sum, f) => sum + f.bytes, 0);
+      tr.appendChild(el("td", "sub mono-num", txt(t("packageInboxFileCount", { count: item.files.length, size: fmtBytes(totalBytes) }))));
+
+      const blocked = item.issues.length > 0;
+      const busy = !!(item.job && ACTIVE_INBOX_JOB.has(item.job.status));
+      const deckSelect = el("select", { "aria-label": t("packageInboxDeck") });
+      if (!item.deck_file) deckSelect.appendChild(el("option", { value: "" }, t("packageInboxPickDeck")));
+      for (const f of item.files) {
+        const opt = el("option", { value: f.name }, f.name);
+        if (f.name === item.deck_file) opt.selected = true;
+        deckSelect.appendChild(opt);
+      }
+      deckSelect.disabled = blocked || busy || !state.writes;
+      tr.appendChild(el("td", "", blocked ? txt("—") : deckSelect));
+
+      const tdStatus = el("td", "");
+      if (blocked) {
+        tdStatus.appendChild(chip("warn", t("packageInboxBlocked")));
+        tdStatus.appendChild(el("div", "sub dim", txt(item.issues.join("; "))));
+      } else if (busy) {
+        tdStatus.appendChild(chip("info", item.job.status));
+      } else if (item.job && item.job.status === "failed") {
+        tdStatus.appendChild(chip("bad", t("packageInboxFailed")));
+        tdStatus.appendChild(el("div", "sub dim", txt(item.job.error || "")));
+      } else {
+        tdStatus.appendChild(chip("dim", t("packageInboxReady")));
+      }
+      tr.appendChild(tdStatus);
+
+      const importBtn = el("button", "plain primary catalog-action-btn", {
+        onclick: async () => {
+          if (!deckSelect.value) {
+            inboxMsg.className = "submit-msg err";
+            inboxMsg.textContent = t("packageInboxPickDeck");
+            return;
+          }
+          importBtn.disabled = true;
+          inboxMsg.className = "submit-msg";
+          inboxMsg.textContent = t("importSubmitted");
+          const r = await postJSON("/api/packages/inbox/import", { directory: item.directory, deck_file: deckSelect.value });
+          if (!r || !r.ok || !r.data) {
+            inboxMsg.className = "submit-msg err";
+            showError(inboxMsg, t("packageInboxImportFailed", { name: item.directory, error: (r && r.data && r.data.error) || t("netError") }));
+            refreshInbox();
+            return;
+          }
+          pollInboxJob(r.data.job_id, item.directory);
+          refreshInbox();
+        }
+      }, t("btnImportInbox"));
+      importBtn.disabled = blocked || busy || !state.writes;
+      tr.appendChild(el("td", "", importBtn));
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    inboxListWrap.appendChild(el("div", "table-dense-wrap", table));
+  }
+
+  // The folder is removed once registered, so the outcome is read from the job.
+  function pollInboxJob(jobId, folder) {
+    const tick = async () => {
+      const r = await fetchJSON(`/api/packages/jobs/${encodeURIComponent(jobId)}`);
+      const job = r && r.ok && r.data ? r.data : { status: "failed", error: (r && r.data && r.data.error) || t("netError") };
+      if (ACTIVE_INBOX_JOB.has(job.status)) {
+        if (inboxSection.isConnected) setTimeout(tick, 1000);
+        return;
+      }
+      if (job.status === "registered") {
+        inboxMsg.className = "submit-msg ok";
+        inboxMsg.textContent = t("packageInboxImported", { name: folder });
+      } else {
+        inboxMsg.className = "submit-msg err";
+        showError(inboxMsg, t("packageInboxImportFailed", { name: folder, error: job.error || "" }));
+      }
+      refreshInbox();
+      refreshPackagesCatalog();
+    };
+    setTimeout(tick, 500);
+  }
+
+  async function refreshInbox() {
+    const r = await fetchJSON("/api/packages/inbox");
+    if (!r || !r.ok || !r.data) {
+      inboxSection.hidden = true;
+      return;
+    }
+    inboxSection.hidden = false;
+    renderInbox(r.data);
+  }
+
+  const inboxRefreshBtn = el("button", "plain catalog-action-btn", { onclick: () => refreshInbox() }, t("btnRefreshInbox"));
+  inboxSection.insertBefore(inboxRefreshBtn, inboxMsg);
+  refreshInbox();
+
   // ================= Section 4: Registered Packages Catalog =================
   const catalogSection = el("section", "rule-section packages-catalog-section");
   catalogSection.appendChild(el("h3", "section-heading", txt(t("packageCatalogSectionTitle") || "已登记 Package")));
   container.appendChild(catalogSection);
 
+  const catalogMsg = el("div", "submit-msg");
+  catalogSection.appendChild(catalogMsg);
   const catalogTableWrap = el("div", "packages-catalog-table-wrap");
   catalogSection.appendChild(catalogTableWrap);
 
@@ -469,13 +601,19 @@ export function renderPackagesView() {
       const artId = pkg.artifact_id || `pkg.${pName}`;
       const rev = pkg.revision || "sha256:registered";
       const status = pkg.status || "registered";
-      const isExpanded = !!state.expandedPackageManifests[pName];
+      // One package can list several rows (registered plus unclaimed
+      // revision directories), so the expanded state follows the directory.
+      const rowKey = pkg.path || pName;
+      const isExpanded = !!state.expandedPackageManifests[rowKey];
 
       const tr = el("tr");
       tr.appendChild(el("td", "mono mono-pkg-name", txt(pName)));
       tr.appendChild(el("td", "mono dim mono-art-id", txt(artId)));
       tr.appendChild(el("td", "mono col-rev-cell", monoHash(rev, { len: 16 })));
-      tr.appendChild(el("td", "col-status-cell", chip(status === "registered" ? "ok" : "warn", status)));
+      const unclaimed = status === "unclaimed";
+      tr.appendChild(el("td", "col-status-cell", unclaimed
+        ? chip("warn", t("packageStatusUnclaimed"))
+        : chip(status === "registered" || status === "active" ? "ok" : "warn", status)));
       tr.appendChild(el("td", "sub dim mono-num", txt(pkg.created_at ? fmtDate(new Date(pkg.created_at)) : "—")));
 
       const tdAct = el("td", "col-actions-cell");
@@ -484,42 +622,65 @@ export function renderPackagesView() {
       // View Manifest & Files Button
       const manifestBtn = el("button", `plain catalog-action-btn ${isExpanded ? "active" : ""}`, {
         onclick: () => {
-          state.expandedPackageManifests[pName] = !state.expandedPackageManifests[pName];
+          state.expandedPackageManifests[rowKey] = !state.expandedPackageManifests[rowKey];
           buildTable(state.packagesList);
         }
       }, isExpanded ? (t("btnCollapseManifest") || "▲ 收起文件") : (t("btnViewManifest") || "📄 查看文件"));
       actGroup.appendChild(manifestBtn);
 
-      // Seed Schema Draft Button
-      const seedDraftBtn = el("button", "plain primary catalog-action-btn", {
-        title: t("tipSeedSchemaFromPackage") || "Seed Schema draft from this package and proceed to editor",
-        onclick: async () => {
-          const deckText = pkg.deck_file_content;
-          if (typeof deckText !== "string") {
-            parseMsg.className = "submit-msg err";
-            parseMsg.textContent = t("packageDeckUnavailable");
-            return;
-          }
-          const parseRes = await postJSON("/api/packages/parse", { deck_text: deckText });
-          if (!parseRes || !parseRes.ok || !parseRes.data) {
-            parseMsg.className = "submit-msg err";
-            showError(parseMsg, (parseRes && parseRes.data && parseRes.data.error) || t("netError") || "Network error");
-            return;
-          }
-          const schemaDoc = buildSchemaDocFromParsed(parseRes.data);
-          schemaDoc.problem_hint = pName.replace(/^pkg-/, "");
-          schemaDoc.source_package = { artifact_id: artId, revision: rev };
-          state.schemaDraft.doc = schemaDoc;
-          state.schemaDraft.rawJson = JSON.stringify(schemaDoc, null, 2);
-          state.schemaDraft.registeredRevision = null;
-          state.schemaDraft.templateConfig = null;
-          state.schemaDraft.savedTemplate = null;
-          state.schemaDraft.mode = "form";
-          state.packagesPackageName = pName;
-          navigate("#/compose?step=2");
+      // A directory without a registration record must be claimed before it
+      // can back a template; its revision would not resolve otherwise.
+      if (unclaimed) {
+        if (state.writes) {
+          actGroup.appendChild(el("button", "plain primary catalog-action-btn", {
+            title: t("tipClaimPackage"),
+            onclick: async (event) => {
+              event.currentTarget.disabled = true;
+              catalogMsg.className = "submit-msg";
+              catalogMsg.textContent = "";
+              const r = await postJSON("/api/packages/claim", { directory: pkg.directory });
+              if (!r || !r.ok) {
+                catalogMsg.className = "submit-msg err";
+                showError(catalogMsg, t("claimPackageFailed", { error: (r && r.data && r.data.error) || t("netError") }));
+              }
+              refreshPackagesCatalog();
+            }
+          }, t("btnClaimPackage")));
+        } else {
+          actGroup.appendChild(el("span", "sub dim", txt(t("tipClaimPackage"))));
         }
-      }, t("btnSeedSchemaFromPackage") || "🌱 生成 Schema");
-      actGroup.appendChild(seedDraftBtn);
+      } else {
+        // Seed Schema Draft Button
+        const seedDraftBtn = el("button", "plain primary catalog-action-btn", {
+          title: t("tipSeedSchemaFromPackage") || "Seed Schema draft from this package and proceed to editor",
+          onclick: async () => {
+            const deckText = pkg.deck_file_content;
+            if (typeof deckText !== "string") {
+              parseMsg.className = "submit-msg err";
+              parseMsg.textContent = t("packageDeckUnavailable");
+              return;
+            }
+            const parseRes = await postJSON("/api/packages/parse", { deck_text: deckText });
+            if (!parseRes || !parseRes.ok || !parseRes.data) {
+              parseMsg.className = "submit-msg err";
+              showError(parseMsg, (parseRes && parseRes.data && parseRes.data.error) || t("netError") || "Network error");
+              return;
+            }
+            const schemaDoc = buildSchemaDocFromParsed(parseRes.data);
+            schemaDoc.problem_hint = pName.replace(/^pkg-/, "");
+            schemaDoc.source_package = { artifact_id: artId, revision: rev };
+            state.schemaDraft.doc = schemaDoc;
+            state.schemaDraft.rawJson = JSON.stringify(schemaDoc, null, 2);
+            state.schemaDraft.registeredRevision = null;
+            state.schemaDraft.templateConfig = null;
+            state.schemaDraft.savedTemplate = null;
+            state.schemaDraft.mode = "form";
+            state.packagesPackageName = pName;
+            navigate("#/compose?step=2");
+          }
+        }, t("btnSeedSchemaFromPackage") || "🌱 生成 Schema");
+        actGroup.appendChild(seedDraftBtn);
+      }
 
       tdAct.appendChild(actGroup);
       tr.appendChild(tdAct);

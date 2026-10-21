@@ -744,6 +744,47 @@ class PackageLandingHttpServerTests(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))
 
+    def test_post_claim_registers_unreferenced_directory(self) -> None:
+        """POST /api/packages/claim records a directory once and reports duplicates as 409."""
+        status, payload = self._post("/api/packages", {"package_name": "pkg-claim-http", "deck_text": "set x = 1\n"})
+        self.assertEqual(status, 202)
+        job = self.landing_service.wait_job(payload["job_id"])
+        (self.project_root / "records" / "artifacts" / "pkg.pkg-claim-http.json").unlink()
+
+        status, payload = self._post("/api/packages/claim", {"directory": "pkg-claim-http"})
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["claimed"])
+        self.assertEqual(payload["revision"], job["package"]["revision"])
+
+        shutil.copytree(self.packages_dir / "pkg-claim-http", self.packages_dir / "pkg-claim-http__copy")
+        status, payload = self._post("/api/packages/claim", {"directory": "pkg-claim-http__copy"})
+        self.assertEqual(status, 409, payload)
+        status, payload = self._post("/api/packages/claim", {"directory": "../escape"})
+        self.assertEqual(status, 400, payload)
+
+    def test_inbox_endpoints_list_and_import_folder(self) -> None:
+        """GET /api/packages/inbox lists folders and POST .../import lands one."""
+        folder = self.landing_service.inbox_dir / "pkg-inbox-http"
+        folder.mkdir()
+        (folder / "deck.in").write_bytes(b"set x = 1\n")
+        (folder / "mesh.bin").write_bytes(b"\x00\xff" * 1024)
+
+        status, payload = self._get("/api/packages/inbox")
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["path"], "data/inputs/inbox")
+        self.assertEqual([i["directory"] for i in payload["items"]], ["pkg-inbox-http"])
+
+        status, payload = self._post("/api/packages/inbox/import", {"directory": "pkg-inbox-http"})
+        self.assertEqual(status, 202, payload)
+        job = self.landing_service.wait_job(payload["job_id"])
+        self.assertEqual(job["status"], "registered", job)
+        status, payload = self._get(f"/api/packages/jobs/{job['job_id']}")
+        self.assertEqual(payload["package"]["artifact_id"], "pkg.pkg-inbox-http")
+        self.assertEqual(self._get("/api/packages/inbox")[1]["items"], [])
+
+        status, payload = self._post("/api/packages/inbox/import", {"directory": "pkg-inbox-http"})
+        self.assertEqual(status, 400, payload)
+
     def test_post_packages_returns_202_accepted_shape(self) -> None:
         """POST /api/packages returns 202 Accepted with job_id and content_hash."""
         deck_text = "go atlas\nset x = 10\nend\n"
