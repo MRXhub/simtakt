@@ -1,5 +1,6 @@
 """Cross-component regressions found while reviewing origin/main..HEAD."""
 import json
+import shutil
 import tempfile
 import threading
 import unittest
@@ -10,7 +11,7 @@ from control_plane.core.evaluation_contracts import ContractError
 from control_plane.core.workspace_artifacts import resolve_workspace_artifact
 from control_plane.evaluation.preparation_phase import PreparationPhase
 from control_plane.evaluation.service import EvaluationMiddleware
-from control_plane.web.package_landing import PackageLandingService
+from control_plane.web.package_landing import PackageClaimConflict, PackageLandingService
 from tests import test_termination_consumption as termination_tests
 from tests import test_adapter_batch_queue_example as batch_tests
 
@@ -43,6 +44,72 @@ class PushReviewRegressions(unittest.TestCase):
         listed = middleware.list_packages()[0]
         self.assertEqual(listed["revision"], package["revision"])
         self.assertEqual(listed["deck_file_content"], body["deck_text"])
+
+    def legacy_package(self, service, **overrides):
+        """A landed directory whose shard is gone, as left by pre-shard builds."""
+        body, job = self.land(service, **overrides)
+        shard = self.root / "records" / "artifacts" / f"{job['package']['artifact_id']}.json"
+        shard.unlink()
+        return body, job
+
+    def test_unreferenced_directory_is_listed_as_unclaimed(self):
+        service = self.service()
+        _, job = self.legacy_package(service)
+        listed = EvaluationMiddleware(mock.Mock(), project_root=self.root).list_packages()
+        self.assertEqual([(p["status"], p["directory"]) for p in listed], [("unclaimed", "review-package")])
+        self.assertEqual(listed[0]["path"], job["package"]["path"])
+
+    def test_claim_registers_directory_and_restores_idempotency(self):
+        service = self.service()
+        body, job = self.legacy_package(service)
+        claimed = service.claim_package("review-package")
+        self.assertTrue(claimed["claimed"])
+        self.assertEqual(claimed["revision"], job["package"]["revision"])
+        self.assertEqual(claimed["path"], job["package"]["path"])
+        listed = EvaluationMiddleware(mock.Mock(), project_root=self.root).list_packages()
+        self.assertEqual([p["status"] for p in listed], ["active"])
+        repeated = service.wait_job(service.submit_package(body)["job_id"])
+        self.assertEqual(repeated["package"]["path"], job["package"]["path"])
+        self.assertEqual(sorted(p.name for p in service.packages_dir.iterdir()), ["review-package"])
+
+    def test_claim_is_idempotent(self):
+        service = self.service()
+        self.legacy_package(service)
+        self.assertTrue(service.claim_package("review-package")["claimed"])
+        self.assertFalse(service.claim_package("review-package")["claimed"])
+
+    def test_claim_keeps_existing_latest_revision(self):
+        service = self.service()
+        _, legacy = self.legacy_package(service)
+        _, latest = self.land(service, deck_text="set x = 2\n")
+        claimed = service.claim_package("review-package")
+        self.assertTrue(claimed["claimed"])
+        shard = json.loads((self.root / "records/artifacts/pkg.review-package.json").read_text(encoding="utf-8"))
+        self.assertEqual(shard["artifact"]["latest_revision"], latest["package"]["revision"])
+        self.assertIn(legacy["package"]["revision"], [r["revision"] for r in shard["artifact"]["revisions"]])
+
+    def test_claiming_a_copy_of_a_registered_revision_conflicts(self):
+        service = self.service()
+        _, job = self.land(service)
+        source = self.root / job["package"]["path"]
+        shutil.copytree(source, source.with_name("review-package__copy"))
+        with self.assertRaises(PackageClaimConflict):
+            service.claim_package("review-package__copy")
+
+    def test_claim_rejects_unsafe_or_invalid_directories(self):
+        service = self.service()
+        _, job = self.legacy_package(service)
+        for name in ("../review-package", ".staging_x", "Review-Package", "", None, "missing-package"):
+            with self.subTest(name=name), self.assertRaises(ContractError):
+                service.claim_package(name)
+        (self.root / job["package"]["path"] / "deck.in").write_text("tampered", encoding="utf-8")
+        with self.assertRaisesRegex(ContractError, "failed validation"):
+            service.claim_package("review-package")
+        other = service.packages_dir / "other-package"
+        shutil.copytree(self.root / job["package"]["path"], other)
+        (other / "deck.in").write_text("set x = 1\n", encoding="utf-8", newline="\n")
+        with self.assertRaisesRegex(ContractError, "does not match"):
+            service.claim_package("other-package")
 
     def test_changed_auxiliary_file_is_not_deduplicated(self):
         service = self.service()
@@ -113,6 +180,55 @@ class PushReviewRegressions(unittest.TestCase):
         fixture._dispatcher(worker).recover_once(now=termination_tests.BASE_TIME)
         worker.terminate_session.assert_not_called()
         self.assertEqual(fixture.fx.repository.get_attempt(attempt["attempt_id"])["termination_state"], "requested")
+
+    def _unbound_termination_fixture(self):
+        fixture = termination_tests.TerminationConsumptionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        return fixture
+
+    @staticmethod
+    def _drop_allocation(fixture, attempt_id):
+        with fixture.fx.repository._transaction() as connection:
+            connection.execute("UPDATE attempts SET allocation_json = NULL WHERE attempt_id = ?", (attempt_id,))
+
+    def test_unbound_termination_uses_session_ref_directly(self):
+        fixture = self._unbound_termination_fixture()
+        attempt = fixture._requested()
+        self._drop_allocation(fixture, attempt["attempt_id"])
+        worker = mock.Mock()
+        worker.terminate_session.return_value = "terminated"
+        result = fixture._dispatcher(worker).recover_once(now=termination_tests.BASE_TIME)
+        worker.resume_session.assert_not_called()
+        worker.terminate_session.assert_called_once_with(attempt["session_ref"])
+        self.assertEqual(result["termination"], "confirmed")
+        self.assertTrue(result["unbound"])
+        self.assertEqual(fixture.fx.repository.get_attempt(attempt["attempt_id"])["termination_state"], "confirmed")
+
+    def test_unbound_termination_never_trusts_absent(self):
+        fixture = self._unbound_termination_fixture()
+        attempt = fixture._requested()
+        self._drop_allocation(fixture, attempt["attempt_id"])
+        worker = mock.Mock()
+        worker.terminate_session.return_value = "absent"
+        fixture._dispatcher(worker).recover_once(now=termination_tests.BASE_TIME)
+        self.assertEqual(fixture.fx.repository.get_attempt(attempt["attempt_id"])["termination_state"], "unavailable")
+
+    def test_failed_unbound_termination_no_longer_blocks_the_queue(self):
+        fixture = self._unbound_termination_fixture()
+        unbound = fixture._requested()
+        self._drop_allocation(fixture, unbound["attempt_id"])
+        bound = fixture._requested()
+        worker = mock.Mock()
+        worker.terminate_session.side_effect = lambda ref: (
+            (_ for _ in ()).throw(RuntimeError("unknown ref")) if ref == unbound["session_ref"] else "terminated"
+        )
+        dispatcher = fixture._dispatcher(worker)
+        dispatcher.recover_once(now=termination_tests.BASE_TIME)
+        dispatcher.recover_once(now=termination_tests.BASE_TIME + termination_tests.timedelta(seconds=1))
+        repository = fixture.fx.repository
+        self.assertEqual(repository.get_attempt(unbound["attempt_id"])["termination_state"], "unavailable")
+        self.assertEqual(repository.get_attempt(bound["attempt_id"])["termination_state"], "confirmed")
 
     def test_close_drains_already_accepted_jobs(self):
         entered = threading.Event()

@@ -744,6 +744,24 @@ class PackageLandingHttpServerTests(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))
 
+    def test_post_claim_registers_unreferenced_directory(self) -> None:
+        """POST /api/packages/claim records a directory once and reports duplicates as 409."""
+        status, payload = self._post("/api/packages", {"package_name": "pkg-claim-http", "deck_text": "set x = 1\n"})
+        self.assertEqual(status, 202)
+        job = self.landing_service.wait_job(payload["job_id"])
+        (self.project_root / "records" / "artifacts" / "pkg.pkg-claim-http.json").unlink()
+
+        status, payload = self._post("/api/packages/claim", {"directory": "pkg-claim-http"})
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["claimed"])
+        self.assertEqual(payload["revision"], job["package"]["revision"])
+
+        shutil.copytree(self.packages_dir / "pkg-claim-http", self.packages_dir / "pkg-claim-http__copy")
+        status, payload = self._post("/api/packages/claim", {"directory": "pkg-claim-http__copy"})
+        self.assertEqual(status, 409, payload)
+        status, payload = self._post("/api/packages/claim", {"directory": "../escape"})
+        self.assertEqual(status, 400, payload)
+
     def test_post_packages_returns_202_accepted_shape(self) -> None:
         """POST /api/packages returns 202 Accepted with job_id and content_hash."""
         deck_text = "go atlas\nset x = 10\nend\n"

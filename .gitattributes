@@ -4,3 +4,4 @@ examples/**/records/**/*.json -text
 examples/**/config/*.json -text
 project/*.json -text
 *.md -text
+*.sh text eol=lf

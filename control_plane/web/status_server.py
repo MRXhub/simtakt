@@ -33,7 +33,7 @@ from control_plane.evaluation.scheduling_policy import resolve_governed_scheduli
 from control_plane.evaluation.service import EvaluationMiddleware
 
 from control_plane.evaluation import mutation_views
-from control_plane.web.package_landing import PackageLandingService
+from control_plane.web.package_landing import PackageClaimConflict, PackageLandingService
 from control_plane.simulation.adapter_catalog import load_catalog, AdapterCatalogError
 
 DEFAULT_HOST = "127.0.0.1"
@@ -456,6 +456,7 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
             "/api/evaluations",
             "/api/packages/parse",
             "/api/packages",
+            "/api/packages/claim",
             "/api/schemas",
             "/api/candidates/validate",
         }:
@@ -492,12 +493,19 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
                     payload = self.server.package_landing.submit_package(body)
                     self._send_json(202, payload)
                     return
+                elif path == "/api/packages/claim":
+                    if not isinstance(body, dict):
+                        raise ContractError("request body must be an object")
+                    payload = self.server.package_landing.claim_package(body.get("directory"))
                 elif path == "/api/schemas":
                     payload = mutation_views.register_schema(self.server.middleware, body)
                 elif path == "/api/candidates/validate":
                     payload = mutation_views.validate_candidate_parameters(self.server.middleware, body)
         except _HttpError as exc:
             self._send_json(exc.status, {"error": exc.message})
+            return
+        except PackageClaimConflict as exc:
+            self._send_json(409, {"error": str(exc)})
             return
         except ContractError as exc:
             self._send_json(400, {"error": str(exc)})

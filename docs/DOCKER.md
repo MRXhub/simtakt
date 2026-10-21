@@ -39,7 +39,7 @@ docker compose --profile demo down
 若要在镜像内跑通一次最小评测：
 
 ```bash
-docker compose run --rm --user 10001:10001 --workdir /opt/simtakt demo python examples/minimal-runtime/run_demo.py
+docker compose run --rm --workdir /opt/simtakt demo python examples/minimal-runtime/run_demo.py
 ```
 
 预期输出包含 `evaluation terminal status: qualified`。这个命令使用测试适配器，生成的数据随一次性容器清理。
@@ -84,13 +84,13 @@ SIMTAKT_GID=10001
 
 `.env` 不进入 Git。Windows Docker Desktop 可使用 `SIMTAKT_PROJECT_ROOT=C:/simtakt/project`。这是 **Docker 主机路径**，不是仿真服务器路径。
 
-镜像默认以 UID/GID `10001:10001` 运行。为新建 Linux 项目目录设置所有权可用：
+服务进程以镜像内的 `simtakt` 账户运行，默认 UID/GID 为 `10001:10001`。为新建 Linux 项目目录设置所有权可用：
 
 ```bash
 sudo install -d -m 0750 -o 10001 -g 10001 /srv/simtakt/project
 ```
 
-已有目录应按实际管理账户设置 `SIMTAKT_UID` 和 `SIMTAKT_GID`，并确保该账户能读配置、写数据库和输出目录。配置采用 `create_host_path: false`，路径拼错时会报错，而不会悄悄生成一个空项目。
+已有目录应按实际管理账户设置 `SIMTAKT_UID` 和 `SIMTAKT_GID`，并确保该账户能读配置、写数据库和输出目录。Compose 把这两个值作为 `PUID`/`PGID` 传入容器；入口脚本以 root 启动，把 `simtakt` 账户改为这组 ID，再降权执行命令。这样容器的用户表里始终有当前 UID，OpenSSH 等需要查询用户的工具可以正常工作。不要再用 `user:` 或 `docker run --user` 指定 UID：带 `--user` 启动时入口脚本不做映射，用户表里查不到该 UID 时 ssh 会拒绝运行。`PUID`/`PGID` 不接受 `0`。配置采用 `create_host_path: false`，路径拼错时会报错，而不会悄悄生成一个空项目。
 
 ## 4. 启动项目
 
@@ -138,10 +138,9 @@ FROM simtakt:local
 USER root
 COPY requirements-site.txt /tmp/requirements-site.txt
 RUN python -m pip install --no-cache-dir -r /tmp/requirements-site.txt
-USER 10001:10001
 ```
 
-先构建基础镜像，再构建站点镜像，并在自己的 Compose override 中调整 `build` 和 `image`。`requirements-site.txt` 由站点维护；核心不会自动安装第三方求解器依赖。
+站点镜像结尾保持 root，不要切换 `USER`；降权由基础镜像的入口脚本按 `PUID`/`PGID` 完成。先构建基础镜像，再构建站点镜像，并在自己的 Compose override 中调整 `build` 和 `image`。`requirements-site.txt` 由站点维护；核心不会自动安装第三方求解器依赖。
 
 SSH 使用方式和只读凭据挂载见 [仿真端 SSH 接入](SSH_SIMULATION.md)。私钥和真实连接参数不放入 Dockerfile、镜像或 adapter 目录记录。
 
@@ -177,5 +176,6 @@ docker compose --profile project start web runtime
 | `module import failed` | 检查扩展模块、依赖和容器内 `PYTHONPATH`。 |
 | 页面正常但任务不运行 | 检查 runtime 日志、项目声明、目标资源及 adapter 能力匹配。 |
 | `Host key verification failed` | 核对 SSH 主机指纹与挂载的 `known_hosts`，不要关闭校验。 |
+| `No user exists for uid …` | 容器是以 `user:` / `--user` 指定的 UID 启动的。删掉该设置，改用 `SIMTAKT_UID` / `SIMTAKT_GID`。 |
 
 Compose profile 的行为遵循 [Docker 官方说明](https://docs.docker.com/compose/how-tos/profiles/)；卷、端口和健康检查字段见 [Compose services reference](https://docs.docker.com/reference/compose-file/services/)。

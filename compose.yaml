@@ -4,7 +4,11 @@ x-app: &app
   build: .
   image: simtakt:local
   init: true
-  user: "${SIMTAKT_UID:-10001}:${SIMTAKT_GID:-10001}"
+  # The entrypoint maps the image's simtakt account to these ids, so tools that
+  # look the uid up in /etc/passwd (OpenSSH) keep working with host ownership.
+  environment:
+    PUID: "${SIMTAKT_UID:-10001}"
+    PGID: "${SIMTAKT_GID:-10001}"
   restart: unless-stopped
   stop_grace_period: 30s
 

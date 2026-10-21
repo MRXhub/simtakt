@@ -24,6 +24,8 @@ from control_plane.core.workspace_artifacts import resolve_workspace_artifact
 
 PACKAGE_NAME_REGEX = re.compile(r"^[a-z0-9][a-z0-9-]{2,63}$")
 SAFE_LEAF_NAME_REGEX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+# A landed package directory: ``<package>`` or a later revision ``<package>__<suffix>``.
+PACKAGE_DIR_REGEX = re.compile(r"^([a-z0-9][a-z0-9-]{2,63})(?:__[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 DEFAULT_PACKAGES_REL_PATH = "data/inputs/packages"
 MAX_DIAGNOSTIC_CHARS = 1024
 
@@ -96,6 +98,10 @@ def truncate_diagnostic(text: str, max_chars: int = MAX_DIAGNOSTIC_CHARS) -> str
 
 class PackageLandingError(Exception):
     """Raised when package staging, verification, or landing fails."""
+
+
+class PackageClaimConflict(ContractError):
+    """Raised when a claimed directory's revision is already registered elsewhere."""
 
 
 @dataclass
@@ -213,6 +219,7 @@ class PackageLandingService:
         self._jobs: dict[str, PackageJob] = {}
         self._jobs_by_key: dict[tuple[str, str], str] = {}
         self._lock = threading.Lock()
+        self._shard_lock = threading.Lock()
         self._queue: queue.Queue[str | None] = queue.Queue()
         self._closed = False
         self._worker_thread: threading.Thread | None = None
@@ -255,7 +262,9 @@ class PackageLandingService:
             self._logger.warning("artifact consistency: cannot scan destinations: %s", exc)
             return
         for path in sorted(set(destinations) - referenced):
-            self._logger.warning("artifact consistency: destination exists but is not referenced by any shard: %s", path)
+            self._logger.warning(
+                "artifact consistency: destination exists but is not referenced by any shard "
+                "(claim it with POST /api/packages/claim): %s", path)
         for path in sorted(referenced - set(destinations)):
             self._logger.warning("artifact consistency: shard references missing destination: %s", path)
 
@@ -483,6 +492,112 @@ class PackageLandingService:
 
         return None
 
+    def claim_package(self, directory: Any) -> dict[str, Any]:
+        """Register an existing package directory that no shard references.
+
+        The directory must sit directly under the packages root, be named
+        ``<package>`` or ``<package>__<suffix>``, and carry a manifest for that
+        package that passes the landing validator. Files are never moved or
+        rewritten: claiming only records the directory as a revision. Claiming
+        an already-recorded directory again returns it with ``claimed`` False.
+        """
+        if not isinstance(directory, str) or not directory.strip():
+            raise ContractError("directory is required and must be a string")
+        name = directory.strip()
+        match = PACKAGE_DIR_REGEX.match(name)
+        if match is None or not is_safe_package_name(match.group(1)):
+            raise ContractError(f"invalid package directory name '{name}'")
+        package_name = match.group(1)
+        package_dir = (self.packages_dir / name).resolve()
+        if package_dir.parent != self.packages_dir or not package_dir.is_dir():
+            raise ContractError(f"package directory not found: {name}")
+
+        if self.validator is not None:
+            valid, err_msg = self.validator(package_dir)
+        else:
+            valid, err_msg = default_powershell_validator(package_dir, self.project_root)
+        if not valid:
+            raise ContractError(
+                "package directory failed validation: "
+                + truncate_diagnostic(relativize_text(err_msg or "validation rejected", self.project_root))
+            )
+        manifest = json.loads((package_dir / "manifest.json").read_text(encoding="utf-8"))
+        if manifest.get("package_name", package_name) != package_name:
+            raise ContractError(
+                f"manifest package_name '{manifest.get('package_name')}' does not match directory '{name}'"
+            )
+
+        manifest_hash, recorded_path = self._record_revision(package_name, package_dir, make_latest=False)
+        if recorded_path is not None and recorded_path != package_dir:
+            raise PackageClaimConflict(
+                f"revision {manifest_hash} is already registered at {self._rel_path(recorded_path)}"
+            )
+        return {
+            "artifact_id": f"pkg.{package_name}",
+            "package_name": package_name,
+            "revision": manifest_hash,
+            "path": self._rel_path(package_dir),
+            "claimed": recorded_path is None,
+        }
+
+    def _record_revision(
+        self, package_name: str, package_dir: Path, *, make_latest: bool = True
+    ) -> tuple[str, Path | None]:
+        """Add ``package_dir``'s manifest revision to the package's artifact shard.
+
+        Returns the revision and, when that revision was already recorded, the
+        directory the shard points at; nothing is written in that case. A new
+        shard always makes its first revision the latest one.
+        """
+        records_artifacts = self.project_root / "records" / "artifacts"
+        records_artifacts.mkdir(parents=True, exist_ok=True)
+        artifact_id = f"pkg.{package_name}"
+        manifest_hash = "sha256:" + hashlib.sha256((package_dir / "manifest.json").read_bytes()).hexdigest().lower()
+        revision = {
+            "revision": manifest_hash, "hash_scope": "package-manifest",
+            "locations": [{"storage": "workspace", "role": "primary", "availability": "current",
+                           "path": self._rel_path(package_dir)}],
+        }
+        shard_file = records_artifacts / f"{artifact_id}.json"
+        with self._shard_lock:
+            if shard_file.exists():
+                try:
+                    shard_data = json.loads(shard_file.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    raise PackageLandingError(
+                        f"artifact shard is corrupted and cannot be parsed: {shard_file}: {exc}"
+                    ) from exc
+                artifact = shard_data.get("artifact")
+                if (
+                    shard_data.get("schema_version") != 1
+                    or shard_data.get("record_kind") != "artifact-catalog-shard"
+                    or not isinstance(artifact, dict)
+                    or artifact.get("artifact_id") != artifact_id
+                    or artifact.get("kind") != "input-package"
+                    or artifact.get("status") != "active"
+                    or not isinstance(artifact.get("revisions"), list)
+                ):
+                    raise PackageLandingError(f"artifact shard is invalid: {shard_file}")
+                revisions = artifact["revisions"]
+                matches = [r for r in revisions if isinstance(r, dict) and str(r.get("revision", "")).lower() == manifest_hash]
+                if matches:
+                    return manifest_hash, (self.project_root / str(matches[0]["locations"][0]["path"])).resolve()
+                revisions.append(revision)
+                if make_latest:
+                    artifact["latest_revision"] = manifest_hash
+            else:
+                shard_data = {
+                    "schema_version": 1, "record_kind": "artifact-catalog-shard",
+                    "artifact": {
+                        "artifact_id": artifact_id, "kind": "input-package", "status": "active",
+                        "latest_revision": manifest_hash, "revisions": [revision],
+                    },
+                }
+            tmp = shard_file.with_name(f".{shard_file.name}.{uuid.uuid4().hex}.tmp")
+            tmp.write_bytes(json.dumps(shard_data, indent=2).encode("utf-8") + b"\n")
+            os.replace(tmp, shard_file)
+        return manifest_hash, None
+
     def wait_job(self, job_id: str, timeout: float = 10.0) -> dict[str, Any]:
         """Synchronously wait for a job to reach a terminal state."""
         deadline = time.monotonic() + timeout
@@ -650,60 +765,11 @@ class PackageLandingService:
             staging_dir.replace(dest_dir)
             created_dest = True
 
-            records_artifacts = self.project_root / "records" / "artifacts"
-            records_artifacts.mkdir(parents=True, exist_ok=True)
-            if records_artifacts.is_dir():
-                manifest_path = dest_dir / "manifest.json"
-                manifest_hash = "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest().lower()
-                shard_file = records_artifacts / f"pkg.{job.package_name}.json"
-                shard_data: dict[str, Any]
-                matching = False
-                if shard_file.exists():
-                    try:
-                        shard_data = json.loads(shard_file.read_text(encoding="utf-8"))
-                    except Exception as exc:
-                        raise PackageLandingError(
-                            f"artifact shard is corrupted and cannot be parsed: {shard_file}: {exc}"
-                        ) from exc
-                    artifact = shard_data.get("artifact")
-                    if (
-                        shard_data.get("schema_version") != 1
-                        or shard_data.get("record_kind") != "artifact-catalog-shard"
-                        or not isinstance(artifact, dict)
-                        or artifact.get("artifact_id") != f"pkg.{job.package_name}"
-                        or artifact.get("kind") != "input-package"
-                        or artifact.get("status") != "active"
-                        or not isinstance(artifact.get("revisions"), list)
-                    ):
-                        raise PackageLandingError(f"artifact shard is invalid: {shard_file}")
-                    revisions = artifact["revisions"]
-                    matches = [r for r in revisions if isinstance(r, dict) and str(r.get("revision", "")).lower() == manifest_hash]
-                    if matches:
-                        matching = True
-                        old_path = self.project_root / str(matches[0]["locations"][0]["path"])
-                        shutil.rmtree(dest_dir, ignore_errors=True)
-                        created_dest = False
-                        dest_dir = old_path
-                    else:
-                        revisions.append({
-                            "revision": manifest_hash, "hash_scope": "package-manifest",
-                            "locations": [{"storage": "workspace", "role": "primary", "availability": "current", "path": self._rel_path(dest_dir)}],
-                        })
-                        artifact["latest_revision"] = manifest_hash
-                else:
-                    shard_data = {
-                        "schema_version": 1, "record_kind": "artifact-catalog-shard",
-                        "artifact": {
-                        "artifact_id": f"pkg.{job.package_name}", "kind": "input-package", "status": "active",
-                            "latest_revision": manifest_hash,
-                            "revisions": [{"revision": manifest_hash, "hash_scope": "package-manifest",
-                                           "locations": [{"storage": "workspace", "role": "primary", "availability": "current", "path": self._rel_path(dest_dir)}]}],
-                        },
-                    }
-                if not matching:
-                    tmp = shard_file.with_name(f".{shard_file.name}.{uuid.uuid4().hex}.tmp")
-                    tmp.write_bytes(json.dumps(shard_data, indent=2).encode("utf-8") + b"\n")
-                    os.replace(tmp, shard_file)
+            manifest_hash, recorded_path = self._record_revision(job.package_name, dest_dir)
+            if recorded_path is not None and recorded_path != dest_dir.resolve():
+                shutil.rmtree(dest_dir, ignore_errors=True)
+                created_dest = False
+                dest_dir = recorded_path
 
             # 4. Registered Terminal State
             with self._lock:

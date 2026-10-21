@@ -438,6 +438,8 @@ export function renderPackagesView() {
   catalogSection.appendChild(el("h3", "section-heading", txt(t("packageCatalogSectionTitle") || "已登记 Package")));
   container.appendChild(catalogSection);
 
+  const catalogMsg = el("div", "submit-msg");
+  catalogSection.appendChild(catalogMsg);
   const catalogTableWrap = el("div", "packages-catalog-table-wrap");
   catalogSection.appendChild(catalogTableWrap);
 
@@ -475,7 +477,10 @@ export function renderPackagesView() {
       tr.appendChild(el("td", "mono mono-pkg-name", txt(pName)));
       tr.appendChild(el("td", "mono dim mono-art-id", txt(artId)));
       tr.appendChild(el("td", "mono col-rev-cell", monoHash(rev, { len: 16 })));
-      tr.appendChild(el("td", "col-status-cell", chip(status === "registered" ? "ok" : "warn", status)));
+      const unclaimed = status === "unclaimed";
+      tr.appendChild(el("td", "col-status-cell", unclaimed
+        ? chip("warn", t("packageStatusUnclaimed"))
+        : chip(status === "registered" || status === "active" ? "ok" : "warn", status)));
       tr.appendChild(el("td", "sub dim mono-num", txt(pkg.created_at ? fmtDate(new Date(pkg.created_at)) : "—")));
 
       const tdAct = el("td", "col-actions-cell");
@@ -489,6 +494,33 @@ export function renderPackagesView() {
         }
       }, isExpanded ? (t("btnCollapseManifest") || "▲ 收起文件") : (t("btnViewManifest") || "📄 查看文件"));
       actGroup.appendChild(manifestBtn);
+
+      // A directory without a registration record must be claimed before it
+      // can back a template; its revision would not resolve otherwise.
+      if (unclaimed) {
+        if (state.writes) {
+          actGroup.appendChild(el("button", "plain primary catalog-action-btn", {
+            title: t("tipClaimPackage"),
+            onclick: async (event) => {
+              event.currentTarget.disabled = true;
+              catalogMsg.className = "submit-msg";
+              catalogMsg.textContent = "";
+              const r = await postJSON("/api/packages/claim", { directory: pkg.directory });
+              if (!r || !r.ok) {
+                catalogMsg.className = "submit-msg err";
+                showError(catalogMsg, t("claimPackageFailed", { error: (r && r.data && r.data.error) || t("netError") }));
+              }
+              refreshPackagesCatalog();
+            }
+          }, t("btnClaimPackage")));
+        } else {
+          actGroup.appendChild(el("span", "sub dim", txt(t("tipClaimPackage"))));
+        }
+        tdAct.appendChild(actGroup);
+        tr.appendChild(tdAct);
+        tbody.appendChild(tr);
+        return;
+      }
 
       // Seed Schema Draft Button
       const seedDraftBtn = el("button", "plain primary catalog-action-btn", {

@@ -6,6 +6,8 @@
 !control_plane/**
 !examples/
 !examples/**
+!docker/
+!docker/entrypoint.sh
 **/__pycache__/
 **/*.pyc
 **/*.pyo

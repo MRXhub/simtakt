@@ -122,6 +122,21 @@ as an artifact. The auditable input baseline is the input-package artifact
 referenced by the ParameterSchema `source_package` at an exact revision, which
 preparation validated and bound into the immutable preparation.
 
+### Claiming existing package directories
+
+An input package is registered when its artifact shard
+(`records/artifacts/pkg.<name>.json`) lists the directory as a revision. A
+directory under `data/inputs/packages/` without such a record (left by an older
+build, an interrupted landing, or copied in by hand) is listed with status
+`unclaimed` and is not treated as registered. `POST /api/packages/claim`
+with `{"directory": "<name>"}` or `{"directory": "<name>__<suffix>"}` validates
+the manifest and file hashes with the landing validator, checks that the
+manifest names the same package, and adds the manifest hash as a revision. Files
+are never moved or rewritten. Claiming does not replace an existing
+`latest_revision`; it returns 409 when the same revision is already registered
+at another directory. After claiming, resubmitting identical content reuses
+the claimed directory.
+
 ## Failure and duration semantics
 
 - Session failure classes `unreachable` and `indeterminate` are distinct from
@@ -130,7 +145,12 @@ preparation validated and bound into the immutable preparation.
   (`service.auto_release_wall_budget` / `dispatcher.recover_once`); a pending
   session is only confirmed terminated when the worker returns `terminated` or
   `absent`, and a monitor/worker without `terminate_session` reports
-  termination as unconfirmed.
+  termination as unconfirmed. An Attempt bound without an allocation (the
+  manual AI/CLI path) cannot be resumed; for a worker that implements
+  `resume_session`, the dispatcher then calls `terminate_session` with the
+  `session_ref` alone. Without the restored binding `absent` proves nothing, so
+  only `terminated` confirms; any other result marks the termination
+  `unavailable` and removes it from the queue instead of retrying it at the head.
 - Workers can include `wall_seconds` / `cpu_seconds` / `peak_rss_bytes` in
   `SolverRunRecord` bodies. When completion feedback is explicitly supplied,
   missing feedback fields are derived by summing wall/CPU durations and taking

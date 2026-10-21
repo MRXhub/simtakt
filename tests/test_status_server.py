@@ -811,7 +811,9 @@ class RealRepositoryListEndpointsTests(unittest.TestCase):
         self.assertEqual(pkg_item["artifact_id"], "pkg:pkg-real-test")
         self.assertEqual(pkg_item["path"], "data/inputs/packages/pkg-real-test")
         self.assertEqual(pkg_item["deck_file"], "deck.in")
-        self.assertEqual(pkg_item["status"], "registered")
+        # No shard references the directory yet, so it is offered for claiming.
+        self.assertEqual(pkg_item["status"], "unclaimed")
+        self.assertEqual(pkg_item["directory"], "pkg-real-test")
         self.assertEqual(pkg_item["created_at"], "2026-08-28T12:00:00+00:00")
         self.assertIn("revision", pkg_item)
 
