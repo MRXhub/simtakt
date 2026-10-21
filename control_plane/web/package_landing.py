@@ -32,6 +32,8 @@ DEFAULT_INBOX_REL_PATH = "data/inputs/inbox"
 # Operating-system clutter that is skipped rather than imported.
 IGNORED_INBOX_FILES = frozenset({"thumbs.db", "desktop.ini"})
 ACTIVE_JOB_STATUSES = frozenset({"queued", "staging", "verifying", "registering"})
+# An inbox folder being imported is renamed to ``.importing.<job>.<name>``.
+HANDOFF_PREFIX = ".importing."
 MAX_DIAGNOSTIC_CHARS = 1024
 
 RESERVED_DEVICE_NAMES = frozenset({
@@ -222,6 +224,7 @@ class PackageLandingService:
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
         self._logger = logging.getLogger(__name__)
         self._cleanup_dangling_staging_dirs()
+        self._restore_interrupted_imports()
         self._scan_artifact_consistency()
         self.validator = validator
         self._jobs: dict[str, PackageJob] = {}
@@ -248,6 +251,19 @@ class PackageLandingService:
                         pass
         except OSError:
             pass
+    def _restore_interrupted_imports(self) -> None:
+        """Return inbox folders whose import was cut off by a restart."""
+        try:
+            entries = [e for e in self.inbox_dir.iterdir() if e.name.startswith(HANDOFF_PREFIX) and e.is_dir()]
+        except OSError:
+            return
+        for entry in entries:
+            parts = entry.name[len(HANDOFF_PREFIX):].split(".", 1)
+            if len(parts) != 2 or not parts[1]:
+                continue
+            restored = self._restore_inbox_folder(entry, parts[1], parts[0])
+            self._logger.warning("inbox: returned interrupted import to %s", self._rel_path(restored))
+
     def _scan_artifact_consistency(self) -> None:
         """Warn about shard/destination mismatches without mutating either side."""
         records = self.project_root / "records" / "artifacts"
@@ -633,12 +649,13 @@ class PackageLandingService:
             self._queue.put(job_id)
         return {"job_id": job_id, "content_hash": "", "status": "queued"}
 
-    def _scan_inbox_folder(self, folder: Path) -> dict[str, Any]:
+    def _scan_inbox_folder(self, folder: Path, name: str | None = None) -> dict[str, Any]:
         """List an inbox folder's importable files and anything blocking import."""
+        name = name or folder.name
         issues: list[str] = []
         files: list[dict[str, Any]] = []
         legacy: dict[str, Any] = {}
-        if not is_safe_package_name(folder.name):
+        if not is_safe_package_name(name):
             issues.append(f"folder name must match {PACKAGE_NAME_REGEX.pattern}")
         try:
             children = sorted(folder.iterdir(), key=lambda p: p.name)
@@ -681,27 +698,84 @@ class PackageLandingService:
         ):
             dependencies = []
         return {
-            "directory": folder.name,
-            "package_name": folder.name if is_safe_package_name(folder.name) else None,
+            "directory": name,
+            "package_name": name if is_safe_package_name(name) else None,
             "files": files,
             "deck_file": deck_file,
             "dependencies": dependencies,
             "issues": issues,
         }
 
-    def _copy_inbox_folder(self, name: str, staging_dir: Path, deck_file: str) -> Path:
-        """Copy an inbox folder's files into staging, rechecking what was queued."""
+    def _hand_off_inbox_folder(
+        self, job: PackageJob, name: str, staging_dir: Path, deck_file: str
+    ) -> tuple[Path, dict[str, tuple[bool, int, int]]]:
+        """Take an inbox folder out of the user's path, then copy it into staging.
+
+        The folder is renamed within the inbox, so later writes to
+        ``inbox/<name>`` start a new folder instead of joining this import. The
+        returned snapshot lets cleanup confirm the handed-off folder still holds
+        exactly what was copied before deleting it.
+        """
         folder = self.inbox_dir / name
         if folder.is_symlink() or not folder.is_dir():
             raise PackageLandingError(f"inbox folder disappeared: {name}")
-        scan = self._scan_inbox_folder(folder)
+        handed_off = self.inbox_dir / f"{HANDOFF_PREFIX}{job.job_id[-8:]}.{name}"
+        try:
+            folder.rename(handed_off)
+        except OSError as exc:
+            raise PackageLandingError(
+                f"inbox folder '{name}' is in use and cannot be imported yet ({exc.strerror or exc})"
+            ) from exc
+        snapshot = self._snapshot_folder(handed_off)
+        scan = self._scan_inbox_folder(handed_off, name)
         if scan["issues"]:
             raise PackageLandingError("; ".join(scan["issues"]))
         if deck_file not in {row["name"] for row in scan["files"]}:
             raise PackageLandingError(f"deck_file '{deck_file}' is no longer in inbox folder '{name}'")
         for row in scan["files"]:
-            shutil.copyfile(folder / row["name"], staging_dir / row["name"])
-        return folder
+            shutil.copyfile(handed_off / row["name"], staging_dir / row["name"])
+        if self._snapshot_folder(handed_off) != snapshot:
+            raise PackageLandingError(f"inbox folder '{name}' changed while it was copied; import it again")
+        return handed_off, snapshot
+
+    @staticmethod
+    def _snapshot_folder(folder: Path) -> dict[str, tuple[bool, int, int]]:
+        """Every entry's kind, size, and modification time, symlinks not followed."""
+        snapshot = {}
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                st = entry.stat(follow_symlinks=False)
+                snapshot[entry.name] = (entry.is_dir(follow_symlinks=False), st.st_size, st.st_mtime_ns)
+        return snapshot
+
+    def _restore_inbox_folder(self, handed_off: Path, name: str, tag: str) -> Path:
+        """Move a handed-off folder back; a folder recreated meanwhile keeps its name."""
+        target = self.inbox_dir / name
+        if target.exists():
+            target = self.inbox_dir / f"{name}.kept-{tag}"
+        handed_off.rename(target)
+        return target
+
+    def _settle_inbox_folder(
+        self, job: PackageJob, handed_off: Path, snapshot: dict[str, tuple[bool, int, int]], *, imported: bool
+    ) -> None:
+        """Delete an imported folder only if unchanged; otherwise return it to the inbox."""
+        name = job.payload["_inbox_dir"]
+        stage = "registered" if imported else "failed"
+        try:
+            if imported and self._snapshot_folder(handed_off) == snapshot:
+                shutil.rmtree(handed_off)
+                message = f"Removed inbox folder {name}."
+            else:
+                restored = self._restore_inbox_folder(handed_off, name, job.job_id[-8:])
+                reason = "changed during import" if imported else "was not imported"
+                message = f"Inbox folder {reason}; returned it as {self._rel_path(restored)}."
+        except OSError as exc:
+            message = (f"Inbox folder {self._rel_path(handed_off)} could not be cleaned up "
+                       f"({exc.strerror or exc}); check it by hand.")
+        with self._lock:
+            now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            job.log_tail.append(f"[{now_str}] [{stage}] {message}")
 
     def _record_revision(
         self, package_name: str, package_dir: Path, *, make_latest: bool = True
@@ -803,17 +877,6 @@ class PackageLandingService:
             now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
             job.log_tail.append(f"[{now_str}] [registered] {message}")
 
-    def _remove_inbox_folder(self, job: PackageJob, folder: Path) -> None:
-        """Clear an imported inbox folder; a leftover folder is reported, not fatal."""
-        try:
-            shutil.rmtree(folder)
-            message = f"Removed inbox folder {self._rel_path(folder)}."
-        except OSError as exc:
-            message = f"Inbox folder {self._rel_path(folder)} could not be removed ({exc.strerror or exc}); delete it by hand."
-        with self._lock:
-            now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
-            job.log_tail.append(f"[{now_str}] [registered] {message}")
-
     def _process_job(self, job_id: str) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -824,6 +887,7 @@ class PackageLandingService:
         dest_dir = self.packages_dir / job.package_name
         created_dest = False
         created_shard_file: Path | None = None
+        handoff = None
 
         try:
             # 1. Staging Step
@@ -844,9 +908,8 @@ class PackageLandingService:
                 raise ContractError(f"invalid or reserved deck_file name '{deck_filename}'")
 
             inbox_name = job.payload.get("_inbox_dir")
-            inbox_folder = None
             if inbox_name:
-                inbox_folder = self._copy_inbox_folder(inbox_name, staging_dir, deck_filename)
+                handoff = self._hand_off_inbox_folder(job, inbox_name, staging_dir, deck_filename)
             else:
                 (staging_dir / deck_filename).write_bytes(
                     job.payload["deck_text"].encode("utf-8")
@@ -881,7 +944,7 @@ class PackageLandingService:
                 deck_filename, files_meta, dependencies
             )
 
-            if inbox_folder is not None:
+            if handoff is not None:
                 content_hash = "sha256:" + hashlib.sha256((staging_dir / deck_filename).read_bytes()).hexdigest()
                 with self._lock:
                     job.content_hash = content_hash
@@ -892,7 +955,7 @@ class PackageLandingService:
                     shutil.rmtree(staging_dir, ignore_errors=True)
                     self._finish_registered(job, registered["revision"], registered["path"],
                                             "Inbox files match an existing revision; nothing new was written.")
-                    self._remove_inbox_folder(job, inbox_folder)
+                    self._settle_inbox_folder(job, *handoff, imported=True)
                     return
 
             manifest_data = {
@@ -981,8 +1044,8 @@ class PackageLandingService:
                 job, manifest_hash, self._rel_path(dest_dir),
                 f"Artifact recorded: pkg.{job.package_name} (revision: {manifest_hash[:16]}...). Ready for Problem derivation.",
             )
-            if inbox_folder is not None:
-                self._remove_inbox_folder(job, inbox_folder)
+            if handoff is not None:
+                self._settle_inbox_folder(job, *handoff, imported=True)
 
         except Exception as exc:
             err_msg = truncate_diagnostic(
@@ -1011,6 +1074,8 @@ class PackageLandingService:
 
             if staging_dir.exists():
                 shutil.rmtree(staging_dir, ignore_errors=True)
+            if handoff is not None:
+                self._settle_inbox_folder(job, *handoff, imported=False)
 
             with self._lock:
                 job.log_tail.append(

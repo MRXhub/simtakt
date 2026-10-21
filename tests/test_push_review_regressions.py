@@ -201,6 +201,54 @@ class PushReviewRegressions(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(ContractError):
                 service.import_inbox({"directory": name})
 
+    def test_inbox_files_added_during_import_are_not_deleted(self):
+        root = self.root
+        def add_late_file(path):
+            # The user writes into the inbox folder while landing is under way.
+            late = root / "data/inputs/inbox/review-package"
+            late.mkdir(exist_ok=True)
+            (late / "late.bin").write_bytes(b"late")
+            return True, None
+        service = PackageLandingService(self.root, validator=add_late_file)
+        self.addCleanup(service.close)
+        self.inbox_folder(service, "review-package", {"deck.in": b"set x = 1\n"})
+        job = service.wait_job(service.import_inbox({"directory": "review-package"})["job_id"])
+        self.assertEqual(job["status"], "registered", job)
+        self.assertEqual((service.inbox_dir / "review-package" / "late.bin").read_bytes(), b"late")
+
+    def test_inbox_folder_changed_after_handoff_is_restored(self):
+        def touch_handed_off_folder(path):
+            # A writer that kept a handle follows the folder to its new name.
+            [handed_off] = [p for p in path.parents[1].joinpath("inbox").iterdir() if p.name.startswith(".")]
+            (handed_off / "deck.in").write_bytes(b"set x = 2\n")
+            (handed_off / "extra.bin").write_bytes(b"extra")
+            return True, None
+        service = PackageLandingService(self.root, validator=touch_handed_off_folder)
+        self.addCleanup(service.close)
+        self.inbox_folder(service, "review-package", {"deck.in": b"set x = 1\n"})
+        job = service.wait_job(service.import_inbox({"directory": "review-package"})["job_id"])
+        self.assertEqual(job["status"], "registered", job)
+        restored = service.inbox_dir / "review-package"
+        self.assertEqual(sorted(p.name for p in restored.iterdir()), ["deck.in", "extra.bin"])
+        self.assertEqual((restored / "deck.in").read_bytes(), b"set x = 2\n")
+        registered = self.root / job["package"]["path"] / "deck.in"
+        self.assertEqual(registered.read_bytes(), b"set x = 1\n")
+        self.assertTrue(any("changed during import" in line for line in job["log_tail"]), job["log_tail"])
+
+    def test_interrupted_inbox_handoff_is_restored_on_startup(self):
+        inbox = self.root / "data/inputs/inbox"
+        handed_off = inbox / ".importing.0123abcd.review-package"
+        handed_off.mkdir(parents=True)
+        (handed_off / "deck.in").write_bytes(b"set x = 1\n")
+        (inbox / "other-package").mkdir()
+        taken = inbox / ".importing.89abcdef.other-package"
+        taken.mkdir()
+        (taken / "deck.in").write_bytes(b"x")
+        service = self.service()
+        self.assertTrue((service.inbox_dir / "review-package" / "deck.in").is_file())
+        self.assertTrue((service.inbox_dir / "other-package.kept-89abcdef" / "deck.in").is_file())
+        self.assertEqual([p.name for p in service.inbox_dir.iterdir() if p.name.startswith(".")], [])
+
     def test_inbox_folder_survives_failed_validation(self):
         service = PackageLandingService(self.root, validator=lambda path: (False, "rejected by site validator"))
         self.addCleanup(service.close)

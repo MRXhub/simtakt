@@ -141,9 +141,19 @@ The worker copies the files into staging, generates a fresh manifest
 latest one, exactly like an upload. Any `manifest.json` in the folder only
 supplies defaults and is never copied, so legacy manifests import cleanly:
 before registration nothing refers to their hash. Importing files identical to
-a registered revision reuses that revision. The inbox folder is removed after
-registration and left untouched when landing fails; the failure shows on the
-folder's listing entry.
+a registered revision reuses that revision.
+
+The worker first renames the folder to `.importing.<job>.<name>` inside the
+inbox, so files written to `inbox/<name>` afterwards start a new folder rather
+than joining an import already under way; a folder still in use cannot be
+renamed on Windows and the job fails with the folder left in place. The worker
+records each entry's kind, size, and modification time before copying and
+fails the job if they change during the copy. After registration the
+handed-off folder is deleted only if it still matches that record; otherwise,
+and whenever landing fails, it is renamed back to `inbox/<name>`, or to
+`<name>.kept-<job>` when a new folder has taken that name. Startup returns
+handed-off folders left by an interrupted import the same way. A failure shows
+on the folder's listing entry.
 
 ### Claiming existing package directories
 
