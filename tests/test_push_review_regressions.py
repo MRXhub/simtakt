@@ -127,6 +127,92 @@ class PushReviewRegressions(unittest.TestCase):
                 service.claim_package("review-package")
         self.assertFalse((self.root / "records/artifacts/pkg.review-package.json").exists())
 
+    def inbox_folder(self, service, name, files):
+        folder = service.inbox_dir / name
+        folder.mkdir()
+        for file_name, content in files.items():
+            (folder / file_name).write_bytes(content)
+        return folder
+
+    def test_inbox_import_generates_manifest_and_clears_folder(self):
+        service = self.service()
+        mesh = bytes(range(256)) * 64
+        folder = self.inbox_folder(service, "review-package", {
+            "deck.in": b"set x = 1\n", "mesh.bin": mesh, ".DS_Store": b"junk",
+            "manifest.json": json.dumps({"artifact_id": "pkg:review-package", "deck_file": "deck.in"}).encode(),
+        })
+        [item] = service.list_inbox()["items"]
+        self.assertEqual((item["deck_file"], item["issues"]), ("deck.in", []))
+        self.assertEqual([f["name"] for f in item["files"]], ["deck.in", "mesh.bin"])
+
+        job = service.wait_job(service.import_inbox({"directory": "review-package"})["job_id"])
+        self.assertEqual(job["status"], "registered", job)
+        self.assertFalse(folder.exists())
+        resolved = resolve_workspace_artifact(self.root, "pkg.review-package",
+            revision=job["package"]["revision"], expected_kind="input-package")
+        manifest = json.loads((resolved.path / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["artifact_id"], "pkg.review-package")
+        self.assertEqual([f["name"] for f in manifest["files"]], ["deck.in", "mesh.bin"])
+        self.assertEqual((resolved.path / "mesh.bin").read_bytes(), mesh)
+        self.assertFalse((resolved.path / ".DS_Store").exists())
+        listed = EvaluationMiddleware(mock.Mock(), project_root=self.root).list_packages()
+        self.assertEqual([p["status"] for p in listed], ["active"])
+
+    def test_inbox_import_needs_deck_choice_when_ambiguous(self):
+        service = self.service()
+        self.inbox_folder(service, "review-package", {"a.in": b"set a = 1\n", "b.in": b"set b = 2\n"})
+        self.assertIsNone(service.list_inbox()["items"][0]["deck_file"])
+        with self.assertRaisesRegex(ContractError, "deck_file is required"):
+            service.import_inbox({"directory": "review-package"})
+        with self.assertRaisesRegex(ContractError, "not a file"):
+            service.import_inbox({"directory": "review-package", "deck_file": "c.in"})
+        job = service.wait_job(service.import_inbox({"directory": "review-package", "deck_file": "b.in"})["job_id"])
+        self.assertEqual(job["status"], "registered", job)
+        manifest = json.loads((self.root / job["package"]["path"] / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["deck_file"], "b.in")
+
+    def test_inbox_reimport_of_identical_files_reuses_revision(self):
+        service = self.service()
+        files = {"deck.in": b"set x = 1\n", "mesh.bin": b"\x00\x01"}
+        self.inbox_folder(service, "review-package", files)
+        first = service.wait_job(service.import_inbox({"directory": "review-package"})["job_id"])
+        folder = self.inbox_folder(service, "review-package", files)
+        second = service.wait_job(service.import_inbox({"directory": "review-package"})["job_id"])
+        self.assertEqual(second["status"], "registered", second)
+        self.assertEqual(second["package"], first["package"])
+        self.assertFalse(folder.exists())
+        self.assertEqual([p.name for p in service.packages_dir.iterdir()], ["review-package"])
+        self.inbox_folder(service, "review-package", {**files, "deck.in": b"set x = 2\n"})
+        third = service.wait_job(service.import_inbox({"directory": "review-package"})["job_id"])
+        self.assertNotEqual(third["package"]["revision"], first["package"]["revision"])
+        self.assertTrue(third["package"]["path"].startswith("data/inputs/packages/review-package__"))
+
+    def test_inbox_rejects_unusable_folders(self):
+        service = self.service()
+        self.inbox_folder(service, "Bad_Name", {"deck.in": b"x"})
+        nested = self.inbox_folder(service, "nested-package", {"deck.in": b"x"})
+        (nested / "sub").mkdir()
+        self.inbox_folder(service, "empty-package", {})
+        issues = {i["directory"]: i["issues"] for i in service.list_inbox()["items"]}
+        self.assertIn("folder name must match", issues["Bad_Name"][0])
+        self.assertIn("only plain files", issues["nested-package"][0])
+        self.assertIn("no files", issues["empty-package"][0])
+        for name in ("Bad_Name", "nested-package", "empty-package", "../review-package", "missing", None):
+            with self.subTest(name=name), self.assertRaises(ContractError):
+                service.import_inbox({"directory": name})
+
+    def test_inbox_folder_survives_failed_validation(self):
+        service = PackageLandingService(self.root, validator=lambda path: (False, "rejected by site validator"))
+        self.addCleanup(service.close)
+        folder = self.inbox_folder(service, "review-package", {"deck.in": b"set x = 1\n"})
+        job = service.wait_job(service.import_inbox({"directory": "review-package"})["job_id"])
+        self.assertEqual(job["status"], "failed")
+        self.assertTrue((folder / "deck.in").is_file())
+        self.assertEqual(list(service.packages_dir.iterdir()), [])
+        [item] = service.list_inbox()["items"]
+        self.assertEqual(item["job"]["status"], "failed")
+        self.assertIn("rejected by site validator", item["job"]["error"])
+
     def test_changed_auxiliary_file_is_not_deduplicated(self):
         service = self.service()
         _, first = self.land(service, files={"material.txt": "old"})

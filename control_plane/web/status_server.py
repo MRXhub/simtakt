@@ -457,6 +457,7 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
             "/api/packages/parse",
             "/api/packages",
             "/api/packages/claim",
+            "/api/packages/inbox/import",
             "/api/schemas",
             "/api/candidates/validate",
         }:
@@ -497,6 +498,10 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
                     if not isinstance(body, dict):
                         raise ContractError("request body must be an object")
                     payload = self.server.package_landing.claim_package(body.get("directory"))
+                elif path == "/api/packages/inbox/import":
+                    payload = self.server.package_landing.import_inbox(body)
+                    self._send_json(202, payload)
+                    return
                 elif path == "/api/schemas":
                     payload = mutation_views.register_schema(self.server.middleware, body)
                 elif path == "/api/candidates/validate":
@@ -607,6 +612,10 @@ class StatusRequestHandler(BaseHTTPRequestHandler):
             if job is None:
                 raise _HttpError(404, f"Package job not found: {job_id}")
             return job
+        if path == "/api/packages/inbox":
+            if self.server.package_landing is None:
+                raise _HttpError(404, "package landing service is disabled on read-only server")
+            return self.server.package_landing.list_inbox()
         if path == "/api/packages":
             return {"items": self.server.middleware.list_packages()}
         if path == "/api/schemas":

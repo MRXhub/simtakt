@@ -62,8 +62,11 @@ docker compose run --rm --workdir /opt/simtakt demo python examples/minimal-runt
 │   └── site_simtakt/        # 自定义 Python Worker、adapter、monitor
 │       └── __init__.py
 ├── data/                    # 数据库、输入包及输出
+│   └── inputs/inbox/        # 收件箱：放入待导入的模型文件夹
 └── .runtime/                # 自定义 Worker 的本地持久化记录
 ```
+
+大文件或二进制模型不走网页上传：把整个文件夹复制到 `data/inputs/inbox/<模型名>/`，再在网页的“从收件箱导入”中导入。系统会生成 manifest 并登记，导入成功后文件夹会从收件箱移走。复制进去的文件需要容器账户可读，文件夹本身需要可删除。
 
 Compose 将整个项目绑定挂载到 `/workspace`。数据库固定保存在：
 

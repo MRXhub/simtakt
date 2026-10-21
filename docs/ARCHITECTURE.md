@@ -122,6 +122,29 @@ as an artifact. The auditable input baseline is the input-package artifact
 referenced by the ParameterSchema `source_package` at an exact revision, which
 preparation validated and bound into the immutable preparation.
 
+### Importing folders from the inbox
+
+The JSON upload (`POST /api/packages`) carries text files within the request
+body limit. Large or binary packages go through the inbox instead: copy a
+folder of plain files to `data/inputs/inbox/<name>/`, where the folder name is
+the package name. `GET /api/packages/inbox` lists each folder with its files, a
+suggested deck file, and anything that blocks import (an invalid name,
+subdirectories, symlinks, unsafe file names, or no files). Dotfiles,
+`Thumbs.db`, and `desktop.ini` are skipped.
+
+`POST /api/packages/inbox/import` with `{"directory": "<name>"}` and an
+optional `deck_file` and `dependencies` queues an ordinary landing job. The
+deck is inferred when the folder has one file, exactly one `deck.*` file, or
+an existing `manifest.json` naming a deck; otherwise `deck_file` is required.
+The worker copies the files into staging, generates a fresh manifest
+(`artifact_id: "pkg.<name>"`), validates it, and registers the revision as the
+latest one, exactly like an upload. Any `manifest.json` in the folder only
+supplies defaults and is never copied, so legacy manifests import cleanly:
+before registration nothing refers to their hash. Importing files identical to
+a registered revision reuses that revision. The inbox folder is removed after
+registration and left untouched when landing fails; the failure shows on the
+folder's listing entry.
+
 ### Claiming existing package directories
 
 An input package is registered when its artifact shard
@@ -133,7 +156,8 @@ with `{"directory": "<name>"}` or `{"directory": "<name>__<suffix>"}` validates
 the manifest and file hashes with the landing validator, checks that the
 manifest names the same package and carries `artifact_id: "pkg.<name>"`
 (preparation rejects a manifest whose identity differs from the shard), and
-adds the manifest hash as a revision. Files
+adds the manifest hash as a revision. A directory whose manifest fails these
+checks is imported through the inbox instead. Files
 are never moved or rewritten. Claiming does not replace an existing
 `latest_revision`; it returns 409 when the same revision is already registered
 at another directory. After claiming, resubmitting identical content reuses

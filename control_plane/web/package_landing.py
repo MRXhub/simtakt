@@ -27,6 +27,11 @@ SAFE_LEAF_NAME_REGEX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 # A landed package directory: ``<package>`` or a later revision ``<package>__<suffix>``.
 PACKAGE_DIR_REGEX = re.compile(r"^([a-z0-9][a-z0-9-]{2,63})(?:__[A-Za-z0-9][A-Za-z0-9._-]*)?$")
 DEFAULT_PACKAGES_REL_PATH = "data/inputs/packages"
+# Users drop ``<package>/`` folders here; import generates the manifest.
+DEFAULT_INBOX_REL_PATH = "data/inputs/inbox"
+# Operating-system clutter that is skipped rather than imported.
+IGNORED_INBOX_FILES = frozenset({"thumbs.db", "desktop.ini"})
+ACTIVE_JOB_STATUSES = frozenset({"queued", "staging", "verifying", "registering"})
 MAX_DIAGNOSTIC_CHARS = 1024
 
 RESERVED_DEVICE_NAMES = frozenset({
@@ -202,6 +207,7 @@ class PackageLandingService:
         *,
         validator: Callable[[Path], tuple[bool, str | None]] | None = None,
         packages_dir: Path | str | None = None,
+        inbox_dir: Path | str | None = None,
         autostart: bool = True,
     ) -> None:
         self.project_root = Path(project_root).resolve()
@@ -212,12 +218,15 @@ class PackageLandingService:
                 self.project_root / DEFAULT_PACKAGES_REL_PATH
             ).resolve()
         self.packages_dir.mkdir(parents=True, exist_ok=True)
+        self.inbox_dir = Path(inbox_dir or self.project_root / DEFAULT_INBOX_REL_PATH).resolve()
+        self.inbox_dir.mkdir(parents=True, exist_ok=True)
         self._logger = logging.getLogger(__name__)
         self._cleanup_dangling_staging_dirs()
         self._scan_artifact_consistency()
         self.validator = validator
         self._jobs: dict[str, PackageJob] = {}
         self._jobs_by_key: dict[tuple[str, str], str] = {}
+        self._inbox_jobs: dict[str, str] = {}
         self._lock = threading.Lock()
         self._shard_lock = threading.Lock()
         self._queue: queue.Queue[str | None] = queue.Queue()
@@ -520,6 +529,7 @@ class PackageLandingService:
             raise ContractError(
                 "package directory failed validation: "
                 + truncate_diagnostic(relativize_text(err_msg or "validation rejected", self.project_root))
+                + f"; move the folder into {self._rel_path(self.inbox_dir)} to import it with a generated manifest"
             )
         manifest = json.loads((package_dir / "manifest.json").read_text(encoding="utf-8"))
         if manifest.get("package_name", package_name) != package_name:
@@ -530,7 +540,8 @@ class PackageLandingService:
         # so a claimed revision must already carry the registered identity.
         if manifest.get("artifact_id") != f"pkg.{package_name}":
             raise ContractError(
-                f"manifest artifact_id '{manifest.get('artifact_id')}' must be 'pkg.{package_name}' to be claimed"
+                f"manifest artifact_id '{manifest.get('artifact_id')}' must be 'pkg.{package_name}' to be claimed; "
+                f"move the folder into {self._rel_path(self.inbox_dir)} to import it with a generated manifest"
             )
 
         manifest_hash, recorded_path = self._record_revision(package_name, package_dir, make_latest=False)
@@ -545,6 +556,152 @@ class PackageLandingService:
             "path": self._rel_path(package_dir),
             "claimed": recorded_path is None,
         }
+
+    def list_inbox(self) -> dict[str, Any]:
+        """Describe the folders waiting in the inbox without reading file contents."""
+        items = []
+        try:
+            entries = sorted(self.inbox_dir.iterdir(), key=lambda p: p.name)
+        except OSError:
+            entries = []
+        for entry in entries:
+            if entry.name.startswith(".") or entry.is_symlink() or not entry.is_dir():
+                continue
+            item = self._scan_inbox_folder(entry)
+            with self._lock:
+                job = self._jobs.get(self._inbox_jobs.get(entry.name, ""))
+                item["job"] = {"job_id": job.job_id, "status": job.status, "error": job.error} if job else None
+            items.append(item)
+        return {"path": self._rel_path(self.inbox_dir), "items": items}
+
+    def import_inbox(self, body: Any) -> dict[str, Any]:
+        """Queue an inbox folder for landing as a new package revision.
+
+        The folder name is the package name. Every plain file in it becomes a
+        package file and the manifest is generated during landing, so a legacy
+        ``manifest.json`` in the folder only supplies defaults for ``deck_file``
+        and ``dependencies``. The folder is removed once its files are
+        registered.
+        """
+        if not isinstance(body, Mapping):
+            raise ContractError("request body must be an object")
+        directory = body.get("directory")
+        if not isinstance(directory, str) or not directory.strip():
+            raise ContractError("directory is required and must be a string")
+        name = directory.strip()
+        folder = (self.inbox_dir / name).resolve()
+        if folder.parent != self.inbox_dir or not folder.is_dir() or (self.inbox_dir / name).is_symlink():
+            raise ContractError(f"inbox folder not found: {name}")
+        scan = self._scan_inbox_folder(folder)
+        if scan["issues"]:
+            raise ContractError(f"inbox folder '{name}' cannot be imported: " + "; ".join(scan["issues"]))
+
+        deck_file = body.get("deck_file") or scan["deck_file"]
+        if not deck_file:
+            raise ContractError("deck_file is required: choose which file in the folder is the deck")
+        if deck_file not in {row["name"] for row in scan["files"]}:
+            raise ContractError(f"deck_file '{deck_file}' is not a file in inbox folder '{name}'")
+        dependencies = body.get("dependencies")
+        if dependencies is None:
+            dependencies = scan["dependencies"]
+        if not isinstance(dependencies, (list, tuple)):
+            raise ContractError("dependencies must be a list if provided")
+        for dep in dependencies:
+            if not is_safe_leaf_name(dep):
+                raise ContractError(f"invalid or reserved dependency name '{dep}'")
+
+        with self._lock:
+            if self._closed:
+                raise ContractError("package landing service is closed")
+            active = self._jobs.get(self._inbox_jobs.get(name, ""))
+            if active is not None and active.status in ACTIVE_JOB_STATUSES:
+                return {"job_id": active.job_id, "content_hash": active.content_hash, "status": active.status}
+            job_id = f"job-pkg-{uuid.uuid4().hex[:8]}"
+            now = datetime.now(timezone.utc)
+            job = PackageJob(
+                job_id=job_id,
+                package_name=name,
+                content_hash="",
+                status="queued",
+                log_tail=[f"[{now.strftime('%H:%M:%S')}] [queued] Job {job_id} submitted from inbox folder {name}."],
+                payload={"_inbox_dir": name, "deck_file": deck_file, "dependencies": list(dependencies)},
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+            )
+            self._jobs[job_id] = job
+            self._inbox_jobs[name] = job_id
+            self._queue.put(job_id)
+        return {"job_id": job_id, "content_hash": "", "status": "queued"}
+
+    def _scan_inbox_folder(self, folder: Path) -> dict[str, Any]:
+        """List an inbox folder's importable files and anything blocking import."""
+        issues: list[str] = []
+        files: list[dict[str, Any]] = []
+        legacy: dict[str, Any] = {}
+        if not is_safe_package_name(folder.name):
+            issues.append(f"folder name must match {PACKAGE_NAME_REGEX.pattern}")
+        try:
+            children = sorted(folder.iterdir(), key=lambda p: p.name)
+        except OSError as exc:
+            children = []
+            issues.append(f"cannot read folder: {exc.strerror or exc}")
+        for child in children:
+            if child.name.startswith(".") or child.name.casefold() in IGNORED_INBOX_FILES:
+                continue
+            if child.name.casefold() == "manifest.json":
+                try:
+                    data = json.loads(child.read_text(encoding="utf-8"))
+                    legacy = data if isinstance(data, dict) else {}
+                except (OSError, ValueError):
+                    pass
+                continue
+            if child.is_symlink() or not child.is_file():
+                issues.append(f"only plain files can be imported: {child.name}")
+            elif not is_safe_leaf_name(child.name):
+                issues.append(f"unsupported file name: {child.name}")
+            else:
+                files.append({"name": child.name, "bytes": child.stat().st_size})
+        names = [row["name"] for row in files]
+        folded = [n.casefold() for n in names]
+        if len(folded) != len(set(folded)):
+            issues.append("file names must differ by more than letter case")
+        if not files:
+            issues.append("folder has no files to import")
+
+        deck_file = legacy.get("deck_file") if legacy.get("deck_file") in names else None
+        if deck_file is None:
+            decks = [n for n in names if n.split(".")[0].casefold() == "deck"]
+            if len(names) == 1:
+                deck_file = names[0]
+            elif len(decks) == 1:
+                deck_file = decks[0]
+        dependencies = legacy.get("dependencies")
+        if not isinstance(dependencies, list) or not all(
+            isinstance(d, str) and is_safe_leaf_name(d) for d in dependencies
+        ):
+            dependencies = []
+        return {
+            "directory": folder.name,
+            "package_name": folder.name if is_safe_package_name(folder.name) else None,
+            "files": files,
+            "deck_file": deck_file,
+            "dependencies": dependencies,
+            "issues": issues,
+        }
+
+    def _copy_inbox_folder(self, name: str, staging_dir: Path, deck_file: str) -> Path:
+        """Copy an inbox folder's files into staging, rechecking what was queued."""
+        folder = self.inbox_dir / name
+        if folder.is_symlink() or not folder.is_dir():
+            raise PackageLandingError(f"inbox folder disappeared: {name}")
+        scan = self._scan_inbox_folder(folder)
+        if scan["issues"]:
+            raise PackageLandingError("; ".join(scan["issues"]))
+        if deck_file not in {row["name"] for row in scan["files"]}:
+            raise PackageLandingError(f"deck_file '{deck_file}' is no longer in inbox folder '{name}'")
+        for row in scan["files"]:
+            shutil.copyfile(folder / row["name"], staging_dir / row["name"])
+        return folder
 
     def _record_revision(
         self, package_name: str, package_dir: Path, *, make_latest: bool = True
@@ -637,6 +794,26 @@ class PackageLandingService:
         except ValueError:
             return str(path).replace("\\", "/")
 
+    def _finish_registered(self, job: PackageJob, revision: str, path: str, message: str) -> None:
+        with self._lock:
+            job.status = "registered"
+            job.package = {"artifact_id": f"pkg.{job.package_name}", "revision": revision, "path": path}
+            job.error = None
+            job.updated_at = datetime.now(timezone.utc).isoformat()
+            now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            job.log_tail.append(f"[{now_str}] [registered] {message}")
+
+    def _remove_inbox_folder(self, job: PackageJob, folder: Path) -> None:
+        """Clear an imported inbox folder; a leftover folder is reported, not fatal."""
+        try:
+            shutil.rmtree(folder)
+            message = f"Removed inbox folder {self._rel_path(folder)}."
+        except OSError as exc:
+            message = f"Inbox folder {self._rel_path(folder)} could not be removed ({exc.strerror or exc}); delete it by hand."
+        with self._lock:
+            now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            job.log_tail.append(f"[{now_str}] [registered] {message}")
+
     def _process_job(self, job_id: str) -> None:
         with self._lock:
             job = self._jobs.get(job_id)
@@ -666,18 +843,23 @@ class PackageLandingService:
             if not is_safe_leaf_name(deck_filename):
                 raise ContractError(f"invalid or reserved deck_file name '{deck_filename}'")
 
-            (staging_dir / deck_filename).write_bytes(
-                job.payload["deck_text"].encode("utf-8")
-            )
+            inbox_name = job.payload.get("_inbox_dir")
+            inbox_folder = None
+            if inbox_name:
+                inbox_folder = self._copy_inbox_folder(inbox_name, staging_dir, deck_filename)
+            else:
+                (staging_dir / deck_filename).write_bytes(
+                    job.payload["deck_text"].encode("utf-8")
+                )
 
-            extra_files = job.payload.get("files") or {}
-            for fname, fcontent in extra_files.items():
-                if not is_safe_leaf_name(fname):
-                    raise ContractError(f"invalid or reserved file name '{fname}'")
-                if isinstance(fcontent, bytes):
-                    (staging_dir / fname).write_bytes(fcontent)
-                else:
-                    (staging_dir / fname).write_bytes(str(fcontent).encode("utf-8"))
+                extra_files = job.payload.get("files") or {}
+                for fname, fcontent in extra_files.items():
+                    if not is_safe_leaf_name(fname):
+                        raise ContractError(f"invalid or reserved file name '{fname}'")
+                    if isinstance(fcontent, bytes):
+                        (staging_dir / fname).write_bytes(fcontent)
+                    else:
+                        (staging_dir / fname).write_bytes(str(fcontent).encode("utf-8"))
 
             dependencies = list(job.payload.get("dependencies", []))
             for dep in dependencies:
@@ -695,6 +877,23 @@ class PackageLandingService:
                             "sha256": hashlib.sha256(raw).hexdigest().lower(),
                         }
                     )
+            submission_hash = job.payload.get("_submission_hash") or _submission_hash(
+                deck_filename, files_meta, dependencies
+            )
+
+            if inbox_folder is not None:
+                content_hash = "sha256:" + hashlib.sha256((staging_dir / deck_filename).read_bytes()).hexdigest()
+                with self._lock:
+                    job.content_hash = content_hash
+                registered = self.find_registered_package(
+                    job.package_name, content_hash, submission_hash=submission_hash
+                )
+                if registered is not None:
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+                    self._finish_registered(job, registered["revision"], registered["path"],
+                                            "Inbox files match an existing revision; nothing new was written.")
+                    self._remove_inbox_folder(job, inbox_folder)
+                    return
 
             manifest_data = {
                 "schema_version": 2,
@@ -751,7 +950,7 @@ class PackageLandingService:
             # 3. Registering Step. Existing revisions are retained in separate
             # immutable destination directories; never overwrite a package.
             if dest_dir.exists():
-                dest_dir = self.packages_dir / f"{job.package_name}__{job.payload['_submission_hash'][7:]}"
+                dest_dir = self.packages_dir / f"{job.package_name}__{submission_hash[7:]}"
             if dest_dir.exists():
                 raise PackageLandingError(
                     f"destination directory already exists: {self._rel_path(dest_dir)}"
@@ -778,19 +977,12 @@ class PackageLandingService:
                 dest_dir = recorded_path
 
             # 4. Registered Terminal State
-            with self._lock:
-                job.status = "registered"
-                job.package = {
-                    "artifact_id": f"pkg.{job.package_name}",
-                    "revision": manifest_hash,
-                    "path": self._rel_path(dest_dir),
-                }
-                job.error = None
-                job.updated_at = datetime.now(timezone.utc).isoformat()
-                now_str = datetime.now(timezone.utc).strftime("%H:%M:%S")
-                job.log_tail.append(
-                    f"[{now_str}] [registered] Artifact recorded: pkg.{job.package_name} (revision: {manifest_hash[:16]}...). Ready for Problem derivation."
-                )
+            self._finish_registered(
+                job, manifest_hash, self._rel_path(dest_dir),
+                f"Artifact recorded: pkg.{job.package_name} (revision: {manifest_hash[:16]}...). Ready for Problem derivation.",
+            )
+            if inbox_folder is not None:
+                self._remove_inbox_folder(job, inbox_folder)
 
         except Exception as exc:
             err_msg = truncate_diagnostic(
